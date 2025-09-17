@@ -1,0 +1,57 @@
+syntax = "proto3";
+package gossip;
+option go_package = "GossipSystemUtilization/proto;proto";
+
+message PingRequest {
+  string from_id = 1;
+  uint64 seq     = 2;
+}
+
+message PingReply {
+  bool  ok    = 1;
+  int64 ts_ms = 2;
+}
+
+message PingReqRequest {
+  string from_id    = 1;
+  string target_addr = 2; // dove provare il Ping indiretto
+  uint64 seq        = 3;
+}
+
+message PingReqReply {
+  bool  ok    = 1;
+  int64 ts_ms = 2;
+}
+
+service Gossip {
+  rpc Join(JoinRequest) returns (JoinReply);
+  rpc Ping(PingRequest) returns (PingReply);
+  rpc PingReq(PingReqRequest) returns (PingReqReply);
+}
+
+message PeerInfo {
+  string node_id = 1;
+  string addr    = 2;  // host:port gRPC
+  bool   is_seed = 3;
+}
+
+message Stats { // percentuali esposte (INCLUDONO background)
+  string node_id = 1;
+  double cpu_pct = 2;
+  double mem_pct = 3;
+  double gpu_pct = 4; // -1 se GPU assente
+  int64  ts_ms   = 5;
+}
+
+message JoinRequest {
+  string node_id     = 1;
+  string addr        = 2;
+  uint64 incarnation = 3;
+  Stats  my_stats    = 4;
+}
+
+message JoinReply {
+  repeated PeerInfo peers = 1;                 // campione iniziale
+  repeated Stats    stats_snapshot = 2;        // alcune stats fresche
+}
+

@@ -1,0 +1,22 @@
+{
+  "simulation": { "time_scale": 60 },
+
+  "node_power_classes": {
+    "peer_power_distribution": { "weak": 0.20, "medium": 0.50, "powerful": 0.30 },
+    "gpu_presence_probability": { "weak": 0.20, "medium": 0.60, "powerful": 0.80 },
+    "capacity_Hps": {
+      "weak":   { "cpu": 60,  "mem": 80,  "gpu": 50 },
+      "medium": { "cpu": 100, "mem": 100, "gpu": 100 },
+      "powerful": { "cpu": 160, "mem": 130, "gpu": 160 }
+    },
+    "capacity_jitter_fraction": 0.10
+  },
+
+  "background_load": {
+    "percent_baseline_by_power": {
+      "weak":     { "cpu_mean_pct": 14, "cpu_stddev_pp": 3,  "mem_mean_pct": 16, "mem_stddev_pp": 3,  "gpu_mean_pct": 5,  "gpu_stddev_pp": 2 },
+      "medium":   { "cpu_mean_pct": 10, "cpu_stddev_pp": 2,  "mem_mean_pct": 12, "mem_stddev_pp": 2,  "gpu_mean_pct": 4,  "gpu_stddev_pp": 1.5 },
+      "powerful": { "cpu_mean_pct": 8,  "cpu_stddev_pp": 2,  "mem_mean_pct": 10, "mem_stddev_pp": 2,  "gpu_mean_pct": 3,  "gpu_stddev_pp": 1 }
+    }
+  }
+}
