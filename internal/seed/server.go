@@ -15,24 +15,28 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type Sampler func(max int) []*proto.Stats
+
 type Server struct {
 	proto.UnimplementedGossipServer
-	isSeed bool
-	reg    *Registry // solo usato se isSeed==true
-	log    *logx.Logger
-	clock  *simclock.Clock
-	mgr    *swim.Manager // per aggiungere peer alla membership al Join
-	myID   string
+	isSeed  bool
+	reg     *Registry // solo sui seed
+	log     *logx.Logger
+	clock   *simclock.Clock
+	mgr     *swim.Manager
+	myID    string
+	sampler Sampler // come riempire l'AvailBatch di risposta
 }
 
-func NewServer(isSeed bool, reg *Registry, log *logx.Logger, clock *simclock.Clock, mgr *swim.Manager, myID string) *Server {
+func NewServer(isSeed bool, reg *Registry, log *logx.Logger, clock *simclock.Clock, mgr *swim.Manager, myID string, sampler Sampler) *Server {
 	return &Server{
-		isSeed: isSeed,
-		reg:    reg,
-		log:    log,
-		clock:  clock,
-		mgr:    mgr,
-		myID:   myID,
+		isSeed:  isSeed,
+		reg:     reg,
+		log:     log,
+		clock:   clock,
+		mgr:     mgr,
+		myID:    myID,
+		sampler: sampler,
 	}
 }
 
@@ -45,37 +49,34 @@ func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinR
 	s.log.Infof("JOIN ← node_id=%s addr=%s inc=%d cpu=%.1f%% mem=%.1f%% gpu=%.1f%%",
 		req.NodeId, req.Addr, req.Incarnation, ms.CpuPct, ms.MemPct, ms.GpuPct)
 
-	// registra nel registry del seed (per rispondere con un campione)
+	// registry per seed (per dare peers/stats al chiamante)
 	if s.reg != nil {
 		s.reg.UpsertPeer(&proto.PeerInfo{NodeId: req.NodeId, Addr: req.Addr, IsSeed: false})
 		s.reg.UpsertStats(req.MyStats)
 	}
 
-	// registra anche nella membership locale (così il seed lo pinga)
+	// membership per SWIM (così il seed pingherà il nuovo peer)
 	if s.mgr != nil {
 		s.mgr.AddPeer(req.NodeId, req.Addr)
 	}
 
-	peers := []*proto.PeerInfo{}
-	stats := []*proto.Stats{}
+	var peers []*proto.PeerInfo
+	var stats []*proto.Stats
 	if s.reg != nil {
 		peers = s.reg.SamplePeers(req.NodeId, 10)
 		stats = s.reg.SnapshotStats(20)
 	}
-
 	s.log.Infof("JOIN → a %s: peers=%d, stats=%d", req.NodeId, len(peers), len(stats))
 	return &proto.JoinReply{Peers: peers, StatsSnapshot: stats}, nil
 }
 
 // === PING: tutti i nodi rispondono ===
 func (s *Server) Ping(ctx context.Context, req *proto.PingRequest) (*proto.PingReply, error) {
-	// è un “echo” per failure detection
 	return &proto.PingReply{Ok: true, TsMs: time.Now().UnixMilli()}, nil
 }
 
 // === PINGREQ: tutti i nodi aiutano a fare un ping indiretto ===
 func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto.PingReqReply, error) {
-	// Prova a pingare il target_addr e riferisci l’esito
 	dialCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
@@ -95,4 +96,13 @@ func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto
 		return &proto.PingReqReply{Ok: false, TsMs: time.Now().UnixMilli()}, nil
 	}
 	return &proto.PingReqReply{Ok: true, TsMs: time.Now().UnixMilli()}, nil
+}
+
+// === EXCHANGE AVAIL: push-pull semplice ===
+func (s *Server) ExchangeAvail(ctx context.Context, req *proto.AvailBatch) (*proto.AvailBatch, error) {
+	var resp []*proto.Stats
+	if s.sampler != nil {
+		resp = s.sampler(8)
+	}
+	return &proto.AvailBatch{Stats: resp}, nil
 }

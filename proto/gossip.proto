@@ -27,6 +27,7 @@ service Gossip {
   rpc Join(JoinRequest) returns (JoinReply);
   rpc Ping(PingRequest) returns (PingReply);
   rpc PingReq(PingReqRequest) returns (PingReqReply);
+  rpc ExchangeAvail(AvailBatch) returns (AvailBatch);
 }
 
 message PeerInfo {
@@ -55,3 +56,6 @@ message JoinReply {
   repeated Stats    stats_snapshot = 2;        // alcune stats fresche
 }
 
+message AvailBatch {
+  repeated Stats stats = 1;
+}

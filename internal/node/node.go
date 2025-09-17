@@ -1,12 +1,15 @@
 package node
 
 import (
+	//proto "GossipSystemUtilization"
+	//proto "GossipSystemUtilization"
 	"math/rand"
 	"time"
 
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/model"
 	"GossipSystemUtilization/internal/simclock"
+	proto "GossipSystemUtilization/proto"
 )
 
 type Node struct {
@@ -153,4 +156,16 @@ func (n *Node) Init(power model.PowerClass, caps PowerCaps, bgWeak, bgMed, bgStr
 
 	n.Log.Infof("BACKGROUND iniziale → cpu≈%.1f%% mem≈%.1f%% gpu≈%.1f%%  ⇒ published{cpu=%.1f%% mem=%.1f%% gpu=%.1f%%}",
 		bgCPU, bgMEM, bgGPU, pcts.CPU, pcts.MEM, pcts.GPU)
+}
+
+// CurrentStatsProto restituisce le percentuali correnti in proto.Stats.
+func (n *Node) CurrentStatsProto() *proto.Stats {
+	p := n.PublishedPercentages()
+	return &proto.Stats{
+		NodeId: n.ID,
+		CpuPct: p.CPU,
+		MemPct: p.MEM,
+		GpuPct: p.GPU,
+		TsMs:   time.Now().UnixMilli(),
+	}
 }

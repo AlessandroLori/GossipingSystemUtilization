@@ -493,6 +493,50 @@ func (x *JoinReply) GetStatsSnapshot() []*Stats {
 	return nil
 }
 
+type AvailBatch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stats         []*Stats               `protobuf:"bytes,1,rep,name=stats,proto3" json:"stats,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AvailBatch) Reset() {
+	*x = AvailBatch{}
+	mi := &file_gossip_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AvailBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AvailBatch) ProtoMessage() {}
+
+func (x *AvailBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AvailBatch.ProtoReflect.Descriptor instead.
+func (*AvailBatch) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *AvailBatch) GetStats() []*Stats {
+	if x != nil {
+		return x.Stats
+	}
+	return nil
+}
+
 var File_gossip_proto protoreflect.FileDescriptor
 
 const file_gossip_proto_rawDesc = "" +
@@ -529,11 +573,15 @@ const file_gossip_proto_rawDesc = "" +
 	"\bmy_stats\x18\x04 \x01(\v2\r.gossip.StatsR\amyStats\"i\n" +
 	"\tJoinReply\x12&\n" +
 	"\x05peers\x18\x01 \x03(\v2\x10.gossip.PeerInfoR\x05peers\x124\n" +
-	"\x0estats_snapshot\x18\x02 \x03(\v2\r.gossip.StatsR\rstatsSnapshot2\xa1\x01\n" +
+	"\x0estats_snapshot\x18\x02 \x03(\v2\r.gossip.StatsR\rstatsSnapshot\"1\n" +
+	"\n" +
+	"AvailBatch\x12#\n" +
+	"\x05stats\x18\x01 \x03(\v2\r.gossip.StatsR\x05stats2\xda\x01\n" +
 	"\x06Gossip\x12.\n" +
 	"\x04Join\x12\x13.gossip.JoinRequest\x1a\x11.gossip.JoinReply\x12.\n" +
 	"\x04Ping\x12\x13.gossip.PingRequest\x1a\x11.gossip.PingReply\x127\n" +
-	"\aPingReq\x12\x16.gossip.PingReqRequest\x1a\x14.gossip.PingReqReplyB%Z#GossipSystemUtilization/proto;protob\x06proto3"
+	"\aPingReq\x12\x16.gossip.PingReqRequest\x1a\x14.gossip.PingReqReply\x127\n" +
+	"\rExchangeAvail\x12\x12.gossip.AvailBatch\x1a\x12.gossip.AvailBatchB%Z#GossipSystemUtilization/proto;protob\x06proto3"
 
 var (
 	file_gossip_proto_rawDescOnce sync.Once
@@ -547,7 +595,7 @@ func file_gossip_proto_rawDescGZIP() []byte {
 	return file_gossip_proto_rawDescData
 }
 
-var file_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_gossip_proto_goTypes = []any{
 	(*PingRequest)(nil),    // 0: gossip.PingRequest
 	(*PingReply)(nil),      // 1: gossip.PingReply
@@ -557,22 +605,26 @@ var file_gossip_proto_goTypes = []any{
 	(*Stats)(nil),          // 5: gossip.Stats
 	(*JoinRequest)(nil),    // 6: gossip.JoinRequest
 	(*JoinReply)(nil),      // 7: gossip.JoinReply
+	(*AvailBatch)(nil),     // 8: gossip.AvailBatch
 }
 var file_gossip_proto_depIdxs = []int32{
 	5, // 0: gossip.JoinRequest.my_stats:type_name -> gossip.Stats
 	4, // 1: gossip.JoinReply.peers:type_name -> gossip.PeerInfo
 	5, // 2: gossip.JoinReply.stats_snapshot:type_name -> gossip.Stats
-	6, // 3: gossip.Gossip.Join:input_type -> gossip.JoinRequest
-	0, // 4: gossip.Gossip.Ping:input_type -> gossip.PingRequest
-	2, // 5: gossip.Gossip.PingReq:input_type -> gossip.PingReqRequest
-	7, // 6: gossip.Gossip.Join:output_type -> gossip.JoinReply
-	1, // 7: gossip.Gossip.Ping:output_type -> gossip.PingReply
-	3, // 8: gossip.Gossip.PingReq:output_type -> gossip.PingReqReply
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 3: gossip.AvailBatch.stats:type_name -> gossip.Stats
+	6, // 4: gossip.Gossip.Join:input_type -> gossip.JoinRequest
+	0, // 5: gossip.Gossip.Ping:input_type -> gossip.PingRequest
+	2, // 6: gossip.Gossip.PingReq:input_type -> gossip.PingReqRequest
+	8, // 7: gossip.Gossip.ExchangeAvail:input_type -> gossip.AvailBatch
+	7, // 8: gossip.Gossip.Join:output_type -> gossip.JoinReply
+	1, // 9: gossip.Gossip.Ping:output_type -> gossip.PingReply
+	3, // 10: gossip.Gossip.PingReq:output_type -> gossip.PingReqReply
+	8, // 11: gossip.Gossip.ExchangeAvail:output_type -> gossip.AvailBatch
+	8, // [8:12] is the sub-list for method output_type
+	4, // [4:8] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_gossip_proto_init() }
@@ -586,7 +638,7 @@ func file_gossip_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gossip_proto_rawDesc), len(file_gossip_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

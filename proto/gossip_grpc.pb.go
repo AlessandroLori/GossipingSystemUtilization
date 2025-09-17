@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Gossip_Join_FullMethodName    = "/gossip.Gossip/Join"
-	Gossip_Ping_FullMethodName    = "/gossip.Gossip/Ping"
-	Gossip_PingReq_FullMethodName = "/gossip.Gossip/PingReq"
+	Gossip_Join_FullMethodName          = "/gossip.Gossip/Join"
+	Gossip_Ping_FullMethodName          = "/gossip.Gossip/Ping"
+	Gossip_PingReq_FullMethodName       = "/gossip.Gossip/PingReq"
+	Gossip_ExchangeAvail_FullMethodName = "/gossip.Gossip/ExchangeAvail"
 )
 
 // GossipClient is the client API for Gossip service.
@@ -31,6 +32,7 @@ type GossipClient interface {
 	Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinReply, error)
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingReply, error)
 	PingReq(ctx context.Context, in *PingReqRequest, opts ...grpc.CallOption) (*PingReqReply, error)
+	ExchangeAvail(ctx context.Context, in *AvailBatch, opts ...grpc.CallOption) (*AvailBatch, error)
 }
 
 type gossipClient struct {
@@ -71,6 +73,16 @@ func (c *gossipClient) PingReq(ctx context.Context, in *PingReqRequest, opts ...
 	return out, nil
 }
 
+func (c *gossipClient) ExchangeAvail(ctx context.Context, in *AvailBatch, opts ...grpc.CallOption) (*AvailBatch, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AvailBatch)
+	err := c.cc.Invoke(ctx, Gossip_ExchangeAvail_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GossipServer is the server API for Gossip service.
 // All implementations must embed UnimplementedGossipServer
 // for forward compatibility.
@@ -78,6 +90,7 @@ type GossipServer interface {
 	Join(context.Context, *JoinRequest) (*JoinReply, error)
 	Ping(context.Context, *PingRequest) (*PingReply, error)
 	PingReq(context.Context, *PingReqRequest) (*PingReqReply, error)
+	ExchangeAvail(context.Context, *AvailBatch) (*AvailBatch, error)
 	mustEmbedUnimplementedGossipServer()
 }
 
@@ -96,6 +109,9 @@ func (UnimplementedGossipServer) Ping(context.Context, *PingRequest) (*PingReply
 }
 func (UnimplementedGossipServer) PingReq(context.Context, *PingReqRequest) (*PingReqReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PingReq not implemented")
+}
+func (UnimplementedGossipServer) ExchangeAvail(context.Context, *AvailBatch) (*AvailBatch, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExchangeAvail not implemented")
 }
 func (UnimplementedGossipServer) mustEmbedUnimplementedGossipServer() {}
 func (UnimplementedGossipServer) testEmbeddedByValue()                {}
@@ -172,6 +188,24 @@ func _Gossip_PingReq_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gossip_ExchangeAvail_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AvailBatch)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServer).ExchangeAvail(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gossip_ExchangeAvail_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServer).ExchangeAvail(ctx, req.(*AvailBatch))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Gossip_ServiceDesc is the grpc.ServiceDesc for Gossip service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +224,10 @@ var Gossip_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PingReq",
 			Handler:    _Gossip_PingReq_Handler,
+		},
+		{
+			MethodName: "ExchangeAvail",
+			Handler:    _Gossip_ExchangeAvail_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -72,6 +72,29 @@ type Config struct {
 	SuspicionTimeoutS float64
 }
 
+// AlivePeers: snapshot dei peer non DEAD.
+type Peer struct{ ID, Addr string }
+
+func (m *Manager) AlivePeers() []Peer {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Peer, 0, len(m.peers))
+	for _, p := range m.peers {
+		if p.Status != Dead {
+			out = append(out, Peer{ID: p.ID, Addr: p.Addr})
+		}
+	}
+	return out
+}
+
+// FanoutHint: suggerisce un fanout minimo (qui costante).
+func (m *Manager) FanoutHint(hint int) int {
+	if hint <= 0 {
+		hint = 2
+	}
+	return hint
+}
+
 func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock, rnd *rand.Rand, cfg Config) *Manager {
 	if cfg.PeriodSimS <= 0 {
 		cfg.PeriodSimS = 1.0

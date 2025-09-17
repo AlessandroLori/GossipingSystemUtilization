@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"GossipSystemUtilization/internal/antientropy"
 	"GossipSystemUtilization/internal/config"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/model"
@@ -151,7 +152,23 @@ func main() {
 	mgr := swim.NewManager(id, grpcAddr, log, clock, r, swimCfg)
 	mgr.Start()
 
-	// === gRPC server (Join solo sui seed; Ping/PingReq su tutti) ===
+	// === Anti-entropy (avail gossip) ===
+	store := antientropy.NewStore(log, clock)
+	selfSampler := func() *proto.Stats { return n.CurrentStatsProto() }
+
+	aeCfg := antientropy.Config{
+		PeriodSimS: 3.0,
+		Fanout:     2,
+		SampleSize: 8,
+		TtlSimS:    12.0,
+	}
+	engine := antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
+	engine.Start()
+
+	// Semina lo store con le stats locali per evitare age-out dello self
+	store.UpsertBatch([]*proto.Stats{n.CurrentStatsProto()})
+
+	// === gRPC server (Join solo sui seed; Ping/PingReq/ExchangeAvail su tutti) ===
 	lis, err := net.Listen("tcp", grpcAddr)
 	if err != nil {
 		log.Errorf("listen %s: %v", grpcAddr, err)
@@ -164,14 +181,16 @@ func main() {
 		// registra il seed nel registry (così può essere restituito nei campioni)
 		reg.UpsertPeer(&proto.PeerInfo{NodeId: id, Addr: grpcAddr, IsSeed: true})
 
-		srv := seed.NewServer(true, reg, log, clock, mgr, id)
+		srv := seed.NewServer(true, reg, log, clock, mgr, id,
+			func(max int) []*proto.Stats { return engine.LocalSample(max) })
 		proto.RegisterGossipServer(s, srv)
-		log.Infof("SEED attivo su %s (Join/Ping/PingReq pronti)", grpcAddr)
+		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail pronti)", grpcAddr)
 	} else {
-		// server che espone Ping/PingReq; Join restituisce Unimplemented
-		srv := seed.NewServer(false, nil, log, clock, mgr, id)
+		// server che espone Ping/PingReq/ExchangeAvail; Join restituisce Unimplemented
+		srv := seed.NewServer(false, nil, log, clock, mgr, id,
+			func(max int) []*proto.Stats { return engine.LocalSample(max) })
 		proto.RegisterGossipServer(s, srv)
-		log.Infof("Peer non-seed su %s (Ping/PingReq pronti)", grpcAddr)
+		log.Infof("Peer non-seed su %s (Ping/PingReq/ExchangeAvail pronti)", grpcAddr)
 	}
 
 	go func() {
@@ -209,6 +228,10 @@ func main() {
 			for _, p := range rep.Peers {
 				mgr.AddPeer(p.NodeId, p.Addr)
 				log.Infof("  peer: node_id=%s addr=%s seed=%v", p.NodeId, p.Addr, p.IsSeed)
+			}
+			// Semina lo store con lo snapshot ricevuto
+			if len(rep.StatsSnapshot) > 0 {
+				store.UpsertBatch(rep.StatsSnapshot)
 			}
 		}
 	} else if !isSeed {
