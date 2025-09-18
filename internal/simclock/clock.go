@@ -57,3 +57,9 @@ func (c *Clock) Stamp() string {
 	t := c.NowSim()
 	return t.Format("15:04:05.000") // hh:mm:ss.mmm (SIM)
 }
+
+// NowSimMs restituisce il tempo simulato corrente in millisecondi Unix.
+// È un helper comodo per evitare di ripetere .NowSim().UnixMilli() in giro.
+func (c *Clock) NowSimMs() int64 {
+	return c.NowSim().UnixMilli()
+}

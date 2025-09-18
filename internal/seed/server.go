@@ -72,7 +72,7 @@ func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinR
 
 // === PING: tutti i nodi rispondono ===
 func (s *Server) Ping(ctx context.Context, req *proto.PingRequest) (*proto.PingReply, error) {
-	return &proto.PingReply{Ok: true, TsMs: time.Now().UnixMilli()}, nil
+	return &proto.PingReply{Ok: true, TsMs: s.clock.NowSim().UnixMilli()}, nil
 }
 
 // === PINGREQ: tutti i nodi aiutano a fare un ping indiretto ===
@@ -84,7 +84,7 @@ func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock())
 	if err != nil {
-		return &proto.PingReqReply{Ok: false, TsMs: time.Now().UnixMilli()}, nil
+		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSim().UnixMilli()}, nil
 	}
 	defer conn.Close()
 
@@ -93,9 +93,10 @@ func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto
 	defer cancel2()
 	_, err = cli.Ping(ctx2, &proto.PingRequest{FromId: s.myID, Seq: req.Seq})
 	if err != nil {
-		return &proto.PingReqReply{Ok: false, TsMs: time.Now().UnixMilli()}, nil
+		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSim().UnixMilli()}, nil
 	}
-	return &proto.PingReqReply{Ok: true, TsMs: time.Now().UnixMilli()}, nil
+	return &proto.PingReqReply{Ok: true, TsMs: s.clock.NowSim().UnixMilli()}, nil
+
 }
 
 // === EXCHANGE AVAIL: push-pull semplice ===

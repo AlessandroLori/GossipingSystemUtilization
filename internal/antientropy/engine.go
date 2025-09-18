@@ -92,9 +92,9 @@ func (e *Engine) loopExchange() {
 		e.clk.SleepSim(e.period)
 
 		// Evita che lo "self" scada: refresha prima di ogni giro
-		if self := e.selfSampler(); self != nil {
-			e.store.UpsertBatch([]*proto.Stats{self})
-		}
+		//if self := e.selfSampler(); self != nil {
+		//	e.store.UpsertBatch([]*proto.Stats{self})
+		//}
 
 		peers := e.swim.AlivePeers()
 		if len(peers) == 0 {

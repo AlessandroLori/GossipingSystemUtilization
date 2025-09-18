@@ -154,7 +154,12 @@ func main() {
 
 	// === Anti-entropy (avail gossip) ===
 	store := antientropy.NewStore(log, clock)
-	selfSampler := func() *proto.Stats { return n.CurrentStatsProto() }
+	// Usa tempo SIM per il timestamp, così TTL funziona correttamente
+	selfSampler := func() *proto.Stats {
+		s := n.CurrentStatsProto()
+		s.TsMs = clock.NowSimMs()
+		return s
+	}
 
 	aeCfg := antientropy.Config{
 		PeriodSimS: 3.0,
@@ -166,7 +171,7 @@ func main() {
 	engine.Start()
 
 	// Semina lo store con le stats locali per evitare age-out dello self
-	store.UpsertBatch([]*proto.Stats{n.CurrentStatsProto()})
+	//store.UpsertBatch([]*proto.Stats{n.CurrentStatsProto()})
 
 	// === gRPC server (Join solo sui seed; Ping/PingReq/ExchangeAvail su tutti) ===
 	lis, err := net.Listen("tcp", grpcAddr)
@@ -214,7 +219,11 @@ func main() {
 			Addr:        grpcAddr,
 			Incarnation: uint64(time.Now().UnixMilli()),
 			MyStats: &proto.Stats{
-				NodeId: n.ID, CpuPct: pcts.CPU, MemPct: pcts.MEM, GpuPct: pcts.GPU, TsMs: time.Now().UnixMilli(),
+				NodeId: n.ID,
+				CpuPct: pcts.CPU,
+				MemPct: pcts.MEM,
+				GpuPct: pcts.GPU,
+				TsMs:   clock.NowSimMs(),
 			},
 		}
 		rep, seedAddr, err := jc.TryJoin(seedsCSV, req)
