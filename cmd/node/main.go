@@ -170,6 +170,14 @@ func main() {
 	engine := antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
 	engine.Start()
 
+	// === Reporter periodico (riepilogo cluster) ===
+	repCfg := antientropy.ReporterConfig{
+		PeriodSimS: 10.0, // ogni 10s di tempo simulato
+		TopK:       3,
+	}
+	reporter := antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
+	reporter.Start()
+
 	// Semina lo store con le stats locali per evitare age-out dello self
 	//store.UpsertBatch([]*proto.Stats{n.CurrentStatsProto()})
 
