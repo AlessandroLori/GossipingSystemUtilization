@@ -23,6 +23,9 @@ const (
 	Gossip_Ping_FullMethodName          = "/gossip.Gossip/Ping"
 	Gossip_PingReq_FullMethodName       = "/gossip.Gossip/PingReq"
 	Gossip_ExchangeAvail_FullMethodName = "/gossip.Gossip/ExchangeAvail"
+	Gossip_Probe_FullMethodName         = "/gossip.Gossip/Probe"
+	Gossip_Commit_FullMethodName        = "/gossip.Gossip/Commit"
+	Gossip_Cancel_FullMethodName        = "/gossip.Gossip/Cancel"
 )
 
 // GossipClient is the client API for Gossip service.
@@ -33,6 +36,9 @@ type GossipClient interface {
 	Ping(ctx context.Context, in *PingRequest, opts ...grpc.CallOption) (*PingReply, error)
 	PingReq(ctx context.Context, in *PingReqRequest, opts ...grpc.CallOption) (*PingReqReply, error)
 	ExchangeAvail(ctx context.Context, in *AvailBatch, opts ...grpc.CallOption) (*AvailBatch, error)
+	Probe(ctx context.Context, in *ProbeRequest, opts ...grpc.CallOption) (*ProbeReply, error)
+	Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitReply, error)
+	Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*CancelReply, error)
 }
 
 type gossipClient struct {
@@ -83,6 +89,36 @@ func (c *gossipClient) ExchangeAvail(ctx context.Context, in *AvailBatch, opts .
 	return out, nil
 }
 
+func (c *gossipClient) Probe(ctx context.Context, in *ProbeRequest, opts ...grpc.CallOption) (*ProbeReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProbeReply)
+	err := c.cc.Invoke(ctx, Gossip_Probe_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gossipClient) Commit(ctx context.Context, in *CommitRequest, opts ...grpc.CallOption) (*CommitReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitReply)
+	err := c.cc.Invoke(ctx, Gossip_Commit_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gossipClient) Cancel(ctx context.Context, in *CancelRequest, opts ...grpc.CallOption) (*CancelReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelReply)
+	err := c.cc.Invoke(ctx, Gossip_Cancel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GossipServer is the server API for Gossip service.
 // All implementations must embed UnimplementedGossipServer
 // for forward compatibility.
@@ -91,6 +127,9 @@ type GossipServer interface {
 	Ping(context.Context, *PingRequest) (*PingReply, error)
 	PingReq(context.Context, *PingReqRequest) (*PingReqReply, error)
 	ExchangeAvail(context.Context, *AvailBatch) (*AvailBatch, error)
+	Probe(context.Context, *ProbeRequest) (*ProbeReply, error)
+	Commit(context.Context, *CommitRequest) (*CommitReply, error)
+	Cancel(context.Context, *CancelRequest) (*CancelReply, error)
 	mustEmbedUnimplementedGossipServer()
 }
 
@@ -112,6 +151,15 @@ func (UnimplementedGossipServer) PingReq(context.Context, *PingReqRequest) (*Pin
 }
 func (UnimplementedGossipServer) ExchangeAvail(context.Context, *AvailBatch) (*AvailBatch, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExchangeAvail not implemented")
+}
+func (UnimplementedGossipServer) Probe(context.Context, *ProbeRequest) (*ProbeReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Probe not implemented")
+}
+func (UnimplementedGossipServer) Commit(context.Context, *CommitRequest) (*CommitReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Commit not implemented")
+}
+func (UnimplementedGossipServer) Cancel(context.Context, *CancelRequest) (*CancelReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Cancel not implemented")
 }
 func (UnimplementedGossipServer) mustEmbedUnimplementedGossipServer() {}
 func (UnimplementedGossipServer) testEmbeddedByValue()                {}
@@ -206,6 +254,60 @@ func _Gossip_ExchangeAvail_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gossip_Probe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProbeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServer).Probe(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gossip_Probe_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServer).Probe(ctx, req.(*ProbeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gossip_Commit_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServer).Commit(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gossip_Commit_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServer).Commit(ctx, req.(*CommitRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gossip_Cancel_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GossipServer).Cancel(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gossip_Cancel_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GossipServer).Cancel(ctx, req.(*CancelRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Gossip_ServiceDesc is the grpc.ServiceDesc for Gossip service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +330,18 @@ var Gossip_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExchangeAvail",
 			Handler:    _Gossip_ExchangeAvail_Handler,
+		},
+		{
+			MethodName: "Probe",
+			Handler:    _Gossip_Probe_Handler,
+		},
+		{
+			MethodName: "Commit",
+			Handler:    _Gossip_Commit_Handler,
+		},
+		{
+			MethodName: "Cancel",
+			Handler:    _Gossip_Cancel_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

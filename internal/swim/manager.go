@@ -9,7 +9,7 @@ import (
 
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/simclock"
-	"GossipSystemUtilization/proto"
+	proto "GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

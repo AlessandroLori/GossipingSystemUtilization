@@ -537,6 +537,482 @@ func (x *AvailBatch) GetStats() []*Stats {
 	return nil
 }
 
+type JobSpec struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,2,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	CpuPct        float64                `protobuf:"fixed64,3,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`            // richiesta in % (0..100)
+	MemPct        float64                `protobuf:"fixed64,4,opt,name=mem_pct,json=memPct,proto3" json:"mem_pct,omitempty"`            // richiesta in % (0..100)
+	GpuPct        float64                `protobuf:"fixed64,5,opt,name=gpu_pct,json=gpuPct,proto3" json:"gpu_pct,omitempty"`            // richiesta in % (0..100, 0 se non serve; -1 non usato qui)
+	DurationMs    int64                  `protobuf:"varint,6,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"` // durata in millisecondi di tempo SIM
+	Notes         string                 `protobuf:"bytes,7,opt,name=notes,proto3" json:"notes,omitempty"`                              // libero (debug)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JobSpec) Reset() {
+	*x = JobSpec{}
+	mi := &file_gossip_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JobSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JobSpec) ProtoMessage() {}
+
+func (x *JobSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JobSpec.ProtoReflect.Descriptor instead.
+func (*JobSpec) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *JobSpec) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *JobSpec) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *JobSpec) GetCpuPct() float64 {
+	if x != nil {
+		return x.CpuPct
+	}
+	return 0
+}
+
+func (x *JobSpec) GetMemPct() float64 {
+	if x != nil {
+		return x.MemPct
+	}
+	return 0
+}
+
+func (x *JobSpec) GetGpuPct() float64 {
+	if x != nil {
+		return x.GpuPct
+	}
+	return 0
+}
+
+func (x *JobSpec) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+func (x *JobSpec) GetNotes() string {
+	if x != nil {
+		return x.Notes
+	}
+	return ""
+}
+
+type ProbeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Job           *JobSpec               `protobuf:"bytes,1,opt,name=job,proto3" json:"job,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeRequest) Reset() {
+	*x = ProbeRequest{}
+	mi := &file_gossip_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeRequest) ProtoMessage() {}
+
+func (x *ProbeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeRequest.ProtoReflect.Descriptor instead.
+func (*ProbeRequest) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ProbeRequest) GetJob() *JobSpec {
+	if x != nil {
+		return x.Job
+	}
+	return nil
+}
+
+type ProbeReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	WillAccept    bool                   `protobuf:"varint,2,opt,name=will_accept,json=willAccept,proto3" json:"will_accept,omitempty"`     // true se il nodo può riservare quanto richiesto
+	Score         float64                `protobuf:"fixed64,3,opt,name=score,proto3" json:"score,omitempty"`                                // più alto = meglio (headroom residuo)
+	HeadroomCpu   float64                `protobuf:"fixed64,4,opt,name=headroom_cpu,json=headroomCpu,proto3" json:"headroom_cpu,omitempty"` // % libera stimata (0..100)
+	HeadroomMem   float64                `protobuf:"fixed64,5,opt,name=headroom_mem,json=headroomMem,proto3" json:"headroom_mem,omitempty"` // % libera stimata (0..100)
+	HeadroomGpu   float64                `protobuf:"fixed64,6,opt,name=headroom_gpu,json=headroomGpu,proto3" json:"headroom_gpu,omitempty"` // % libera stimata (0..100; -1 se GPU assente)
+	Reason        string                 `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`                                // motivazione (se rifiuto)
+	TsMs          int64                  `protobuf:"varint,8,opt,name=ts_ms,json=tsMs,proto3" json:"ts_ms,omitempty"`                       // tempo SIM del peer che risponde
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProbeReply) Reset() {
+	*x = ProbeReply{}
+	mi := &file_gossip_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProbeReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProbeReply) ProtoMessage() {}
+
+func (x *ProbeReply) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProbeReply.ProtoReflect.Descriptor instead.
+func (*ProbeReply) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ProbeReply) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *ProbeReply) GetWillAccept() bool {
+	if x != nil {
+		return x.WillAccept
+	}
+	return false
+}
+
+func (x *ProbeReply) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+func (x *ProbeReply) GetHeadroomCpu() float64 {
+	if x != nil {
+		return x.HeadroomCpu
+	}
+	return 0
+}
+
+func (x *ProbeReply) GetHeadroomMem() float64 {
+	if x != nil {
+		return x.HeadroomMem
+	}
+	return 0
+}
+
+func (x *ProbeReply) GetHeadroomGpu() float64 {
+	if x != nil {
+		return x.HeadroomGpu
+	}
+	return 0
+}
+
+func (x *ProbeReply) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *ProbeReply) GetTsMs() int64 {
+	if x != nil {
+		return x.TsMs
+	}
+	return 0
+}
+
+type CommitRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	ToNodeId      string                 `protobuf:"bytes,2,opt,name=to_node_id,json=toNodeId,proto3" json:"to_node_id,omitempty"` // destinazione (peer che deve eseguire)
+	CpuPct        float64                `protobuf:"fixed64,3,opt,name=cpu_pct,json=cpuPct,proto3" json:"cpu_pct,omitempty"`
+	MemPct        float64                `protobuf:"fixed64,4,opt,name=mem_pct,json=memPct,proto3" json:"mem_pct,omitempty"`
+	GpuPct        float64                `protobuf:"fixed64,5,opt,name=gpu_pct,json=gpuPct,proto3" json:"gpu_pct,omitempty"`
+	DurationMs    int64                  `protobuf:"varint,6,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"` // tempo SIM
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitRequest) Reset() {
+	*x = CommitRequest{}
+	mi := &file_gossip_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitRequest) ProtoMessage() {}
+
+func (x *CommitRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
+func (*CommitRequest) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *CommitRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *CommitRequest) GetToNodeId() string {
+	if x != nil {
+		return x.ToNodeId
+	}
+	return ""
+}
+
+func (x *CommitRequest) GetCpuPct() float64 {
+	if x != nil {
+		return x.CpuPct
+	}
+	return 0
+}
+
+func (x *CommitRequest) GetMemPct() float64 {
+	if x != nil {
+		return x.MemPct
+	}
+	return 0
+}
+
+func (x *CommitRequest) GetGpuPct() float64 {
+	if x != nil {
+		return x.GpuPct
+	}
+	return 0
+}
+
+func (x *CommitRequest) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
+type CommitReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommitReply) Reset() {
+	*x = CommitReply{}
+	mi := &file_gossip_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommitReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommitReply) ProtoMessage() {}
+
+func (x *CommitReply) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommitReply.ProtoReflect.Descriptor instead.
+func (*CommitReply) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CommitReply) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *CommitReply) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type CancelRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	ToNodeId      string                 `protobuf:"bytes,2,opt,name=to_node_id,json=toNodeId,proto3" json:"to_node_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelRequest) Reset() {
+	*x = CancelRequest{}
+	mi := &file_gossip_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelRequest) ProtoMessage() {}
+
+func (x *CancelRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelRequest.ProtoReflect.Descriptor instead.
+func (*CancelRequest) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *CancelRequest) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *CancelRequest) GetToNodeId() string {
+	if x != nil {
+		return x.ToNodeId
+	}
+	return ""
+}
+
+type CancelReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
+	Reason        string                 `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelReply) Reset() {
+	*x = CancelReply{}
+	mi := &file_gossip_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelReply) ProtoMessage() {}
+
+func (x *CancelReply) ProtoReflect() protoreflect.Message {
+	mi := &file_gossip_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelReply.ProtoReflect.Descriptor instead.
+func (*CancelReply) Descriptor() ([]byte, []int) {
+	return file_gossip_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *CancelReply) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *CancelReply) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
 var File_gossip_proto protoreflect.FileDescriptor
 
 const file_gossip_proto_rawDesc = "" +
@@ -576,12 +1052,56 @@ const file_gossip_proto_rawDesc = "" +
 	"\x0estats_snapshot\x18\x02 \x03(\v2\r.gossip.StatsR\rstatsSnapshot\"1\n" +
 	"\n" +
 	"AvailBatch\x12#\n" +
-	"\x05stats\x18\x01 \x03(\v2\r.gossip.StatsR\x05stats2\xda\x01\n" +
+	"\x05stats\x18\x01 \x03(\v2\r.gossip.StatsR\x05stats\"\xbd\x01\n" +
+	"\aJobSpec\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x19\n" +
+	"\bowner_id\x18\x02 \x01(\tR\aownerId\x12\x17\n" +
+	"\acpu_pct\x18\x03 \x01(\x01R\x06cpuPct\x12\x17\n" +
+	"\amem_pct\x18\x04 \x01(\x01R\x06memPct\x12\x17\n" +
+	"\agpu_pct\x18\x05 \x01(\x01R\x06gpuPct\x12\x1f\n" +
+	"\vduration_ms\x18\x06 \x01(\x03R\n" +
+	"durationMs\x12\x14\n" +
+	"\x05notes\x18\a \x01(\tR\x05notes\"1\n" +
+	"\fProbeRequest\x12!\n" +
+	"\x03job\x18\x01 \x01(\v2\x0f.gossip.JobSpecR\x03job\"\xf2\x01\n" +
+	"\n" +
+	"ProbeReply\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1f\n" +
+	"\vwill_accept\x18\x02 \x01(\bR\n" +
+	"willAccept\x12\x14\n" +
+	"\x05score\x18\x03 \x01(\x01R\x05score\x12!\n" +
+	"\fheadroom_cpu\x18\x04 \x01(\x01R\vheadroomCpu\x12!\n" +
+	"\fheadroom_mem\x18\x05 \x01(\x01R\vheadroomMem\x12!\n" +
+	"\fheadroom_gpu\x18\x06 \x01(\x01R\vheadroomGpu\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x13\n" +
+	"\x05ts_ms\x18\b \x01(\x03R\x04tsMs\"\xb0\x01\n" +
+	"\rCommitRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1c\n" +
+	"\n" +
+	"to_node_id\x18\x02 \x01(\tR\btoNodeId\x12\x17\n" +
+	"\acpu_pct\x18\x03 \x01(\x01R\x06cpuPct\x12\x17\n" +
+	"\amem_pct\x18\x04 \x01(\x01R\x06memPct\x12\x17\n" +
+	"\agpu_pct\x18\x05 \x01(\x01R\x06gpuPct\x12\x1f\n" +
+	"\vduration_ms\x18\x06 \x01(\x03R\n" +
+	"durationMs\"5\n" +
+	"\vCommitReply\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"D\n" +
+	"\rCancelRequest\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x1c\n" +
+	"\n" +
+	"to_node_id\x18\x02 \x01(\tR\btoNodeId\"5\n" +
+	"\vCancelReply\x12\x0e\n" +
+	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason2\xf9\x02\n" +
 	"\x06Gossip\x12.\n" +
 	"\x04Join\x12\x13.gossip.JoinRequest\x1a\x11.gossip.JoinReply\x12.\n" +
 	"\x04Ping\x12\x13.gossip.PingRequest\x1a\x11.gossip.PingReply\x127\n" +
 	"\aPingReq\x12\x16.gossip.PingReqRequest\x1a\x14.gossip.PingReqReply\x127\n" +
-	"\rExchangeAvail\x12\x12.gossip.AvailBatch\x1a\x12.gossip.AvailBatchB%Z#GossipSystemUtilization/proto;protob\x06proto3"
+	"\rExchangeAvail\x12\x12.gossip.AvailBatch\x1a\x12.gossip.AvailBatch\x121\n" +
+	"\x05Probe\x12\x14.gossip.ProbeRequest\x1a\x12.gossip.ProbeReply\x124\n" +
+	"\x06Commit\x12\x15.gossip.CommitRequest\x1a\x13.gossip.CommitReply\x124\n" +
+	"\x06Cancel\x12\x15.gossip.CancelRequest\x1a\x13.gossip.CancelReplyB%Z#GossipSystemUtilization/proto;protob\x06proto3"
 
 var (
 	file_gossip_proto_rawDescOnce sync.Once
@@ -595,7 +1115,7 @@ func file_gossip_proto_rawDescGZIP() []byte {
 	return file_gossip_proto_rawDescData
 }
 
-var file_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_gossip_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_gossip_proto_goTypes = []any{
 	(*PingRequest)(nil),    // 0: gossip.PingRequest
 	(*PingReply)(nil),      // 1: gossip.PingReply
@@ -606,25 +1126,39 @@ var file_gossip_proto_goTypes = []any{
 	(*JoinRequest)(nil),    // 6: gossip.JoinRequest
 	(*JoinReply)(nil),      // 7: gossip.JoinReply
 	(*AvailBatch)(nil),     // 8: gossip.AvailBatch
+	(*JobSpec)(nil),        // 9: gossip.JobSpec
+	(*ProbeRequest)(nil),   // 10: gossip.ProbeRequest
+	(*ProbeReply)(nil),     // 11: gossip.ProbeReply
+	(*CommitRequest)(nil),  // 12: gossip.CommitRequest
+	(*CommitReply)(nil),    // 13: gossip.CommitReply
+	(*CancelRequest)(nil),  // 14: gossip.CancelRequest
+	(*CancelReply)(nil),    // 15: gossip.CancelReply
 }
 var file_gossip_proto_depIdxs = []int32{
-	5, // 0: gossip.JoinRequest.my_stats:type_name -> gossip.Stats
-	4, // 1: gossip.JoinReply.peers:type_name -> gossip.PeerInfo
-	5, // 2: gossip.JoinReply.stats_snapshot:type_name -> gossip.Stats
-	5, // 3: gossip.AvailBatch.stats:type_name -> gossip.Stats
-	6, // 4: gossip.Gossip.Join:input_type -> gossip.JoinRequest
-	0, // 5: gossip.Gossip.Ping:input_type -> gossip.PingRequest
-	2, // 6: gossip.Gossip.PingReq:input_type -> gossip.PingReqRequest
-	8, // 7: gossip.Gossip.ExchangeAvail:input_type -> gossip.AvailBatch
-	7, // 8: gossip.Gossip.Join:output_type -> gossip.JoinReply
-	1, // 9: gossip.Gossip.Ping:output_type -> gossip.PingReply
-	3, // 10: gossip.Gossip.PingReq:output_type -> gossip.PingReqReply
-	8, // 11: gossip.Gossip.ExchangeAvail:output_type -> gossip.AvailBatch
-	8, // [8:12] is the sub-list for method output_type
-	4, // [4:8] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	5,  // 0: gossip.JoinRequest.my_stats:type_name -> gossip.Stats
+	4,  // 1: gossip.JoinReply.peers:type_name -> gossip.PeerInfo
+	5,  // 2: gossip.JoinReply.stats_snapshot:type_name -> gossip.Stats
+	5,  // 3: gossip.AvailBatch.stats:type_name -> gossip.Stats
+	9,  // 4: gossip.ProbeRequest.job:type_name -> gossip.JobSpec
+	6,  // 5: gossip.Gossip.Join:input_type -> gossip.JoinRequest
+	0,  // 6: gossip.Gossip.Ping:input_type -> gossip.PingRequest
+	2,  // 7: gossip.Gossip.PingReq:input_type -> gossip.PingReqRequest
+	8,  // 8: gossip.Gossip.ExchangeAvail:input_type -> gossip.AvailBatch
+	10, // 9: gossip.Gossip.Probe:input_type -> gossip.ProbeRequest
+	12, // 10: gossip.Gossip.Commit:input_type -> gossip.CommitRequest
+	14, // 11: gossip.Gossip.Cancel:input_type -> gossip.CancelRequest
+	7,  // 12: gossip.Gossip.Join:output_type -> gossip.JoinReply
+	1,  // 13: gossip.Gossip.Ping:output_type -> gossip.PingReply
+	3,  // 14: gossip.Gossip.PingReq:output_type -> gossip.PingReqReply
+	8,  // 15: gossip.Gossip.ExchangeAvail:output_type -> gossip.AvailBatch
+	11, // 16: gossip.Gossip.Probe:output_type -> gossip.ProbeReply
+	13, // 17: gossip.Gossip.Commit:output_type -> gossip.CommitReply
+	15, // 18: gossip.Gossip.Cancel:output_type -> gossip.CancelReply
+	12, // [12:19] is the sub-list for method output_type
+	5,  // [5:12] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_gossip_proto_init() }
@@ -638,7 +1172,7 @@ func file_gossip_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_gossip_proto_rawDesc), len(file_gossip_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

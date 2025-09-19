@@ -18,5 +18,62 @@
       "medium":   { "cpu_mean_pct": 10, "cpu_stddev_pp": 2,  "mem_mean_pct": 12, "mem_stddev_pp": 2,  "gpu_mean_pct": 4,  "gpu_stddev_pp": 1.5 },
       "powerful": { "cpu_mean_pct": 8,  "cpu_stddev_pp": 2,  "mem_mean_pct": 10, "mem_stddev_pp": 2,  "gpu_mean_pct": 3,  "gpu_stddev_pp": 1 }
     }
+  },
+
+  "workload": {
+    "enabled": true,
+    "mean_interarrival_sim_s": 5.0,
+
+    "duration_buckets": {
+      "small_sim_s": 5.0,
+      "medium_sim_s": 10.0,
+      "large_sim_s": 20.0,
+      "prob_small": 0.60,
+      "prob_medium": 0.30,
+      "prob_large": 0.10
+    },
+
+    "cpu_buckets": {
+      "small_pct": 5.0,
+      "medium_pct": 15.0,
+      "large_pct": 30.0,
+      "prob_small": 0.60,
+      "prob_medium": 0.30,
+      "prob_large": 0.10
+    },
+
+    "mem_buckets": {
+      "small_pct": 5.0,
+      "medium_pct": 15.0,
+      "large_pct": 30.0,
+      "prob_small": 0.60,
+      "prob_medium": 0.30,
+      "prob_large": 0.10
+    },
+
+    "gpu_buckets": {
+      "small_pct": 5.0,
+      "medium_pct": 15.0,
+      "large_pct": 30.0,
+      "prob_small": 0.20,
+      "prob_medium": 0.10,
+      "prob_large": 0.05
+    }
+  },
+
+  "scheduler": {
+    "mode": "local",               
+    "top_k": 3,
+    "overprovision_pct": 5.0,
+    "print_decisions": true
+  },
+
+  "faults": {
+    "enabled": false,
+    "failure_probability": 0.0,    
+    "mean_uptime_sim_s": 600.0,
+    "mean_downtime_sim_s": 30.0,
+    "flap_probability": 0.0,
+    "print_transitions": true
   }
 }

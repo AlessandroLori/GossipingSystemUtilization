@@ -28,6 +28,10 @@ service Gossip {
   rpc Ping(PingRequest) returns (PingReply);
   rpc PingReq(PingReqRequest) returns (PingReqReply);
   rpc ExchangeAvail(AvailBatch) returns (AvailBatch);
+  rpc Probe(ProbeRequest)   returns (ProbeReply);
+  rpc Commit(CommitRequest) returns (CommitReply);
+  rpc Cancel(CancelRequest) returns (CancelReply);
+
 }
 
 message PeerInfo {
@@ -58,4 +62,53 @@ message JoinReply {
 
 message AvailBatch {
   repeated Stats stats = 1;
+}
+
+message JobSpec {
+  string job_id     = 1;
+  string owner_id   = 2;
+  double cpu_pct    = 3;   // richiesta in % (0..100)
+  double mem_pct    = 4;   // richiesta in % (0..100)
+  double gpu_pct    = 5;   // richiesta in % (0..100, 0 se non serve; -1 non usato qui)
+  int64  duration_ms = 6;  // durata in millisecondi di tempo SIM
+  string notes      = 7;   // libero (debug)
+}
+
+message ProbeRequest {
+  JobSpec job = 1;
+}
+
+message ProbeReply {
+  string node_id       = 1;
+  bool   will_accept   = 2;   // true se il nodo può riservare quanto richiesto
+  double score         = 3;   // più alto = meglio (headroom residuo)
+  double headroom_cpu  = 4;   // % libera stimata (0..100)
+  double headroom_mem  = 5;   // % libera stimata (0..100)
+  double headroom_gpu  = 6;   // % libera stimata (0..100; -1 se GPU assente)
+  string reason        = 7;   // motivazione (se rifiuto)
+  int64  ts_ms         = 8;   // tempo SIM del peer che risponde
+}
+
+message CommitRequest {
+  string job_id      = 1;
+  string to_node_id  = 2;  // destinazione (peer che deve eseguire)
+  double cpu_pct     = 3;
+  double mem_pct     = 4;
+  double gpu_pct     = 5;
+  int64  duration_ms = 6;  // tempo SIM
+}
+
+message CommitReply {
+  bool   ok     = 1;
+  string reason = 2;
+}
+
+message CancelRequest {
+  string job_id     = 1;
+  string to_node_id = 2;
+}
+
+message CancelReply {
+  bool   ok     = 1;
+  string reason = 2;
 }
