@@ -13,6 +13,7 @@ import (
 
 	"GossipSystemUtilization/internal/antientropy"
 	"GossipSystemUtilization/internal/config"
+	"GossipSystemUtilization/internal/faults"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/model"
 	"GossipSystemUtilization/internal/node"
@@ -26,6 +27,72 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// --- helpers: gRPC start/stop (crash & recovery friendly) ---
+func startGRPCServer(
+	isSeed bool,
+	grpcAddr string,
+	log *logx.Logger,
+	clock *simclock.Clock,
+	mgr *swim.Manager,
+	myID string,
+	sampler seed.Sampler,
+	selfStatsFn func() *proto.Stats,
+	applyCommitFn func(string, float64, float64, float64, int64) bool,
+	cancelFn func(string) bool,
+	r *mrand.Rand,
+) (s *grpc.Server, lis net.Listener, reg *seed.Registry, err error) {
+
+	lis, err = net.Listen("tcp", grpcAddr)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("listen %s: %w", grpcAddr, err)
+	}
+	s = grpc.NewServer()
+
+	if isSeed {
+		reg = seed.NewRegistry(r)
+		reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: true})
+	}
+
+	srv := seed.NewServer(
+		isSeed,
+		reg,
+		log,
+		clock,
+		mgr,
+		myID,
+		sampler,
+		selfStatsFn,
+		applyCommitFn,
+		cancelFn,
+	)
+	proto.RegisterGossipServer(s, srv)
+
+	go func() {
+		if err := s.Serve(lis); err != nil {
+			log.Errorf("gRPC Serve: %v", err)
+		}
+	}()
+
+	if isSeed {
+		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
+	} else {
+		log.Infof("Peer non-seed su %s (Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
+	}
+
+	return s, lis, reg, nil
+}
+
+// stopGRPCServer: ferma il server gRPC e chiude il listener (idempotente)
+func stopGRPCServer(s *grpc.Server, lis net.Listener, log *logx.Logger) {
+	if s != nil {
+		s.Stop()
+	}
+	if lis != nil {
+		_ = lis.Close()
+	}
+	log.Warnf("gRPC fermato (server e listener chiusi)")
+}
 
 func newNodeID() string {
 	b := make([]byte, 6)
@@ -185,69 +252,133 @@ func main() {
 	store.UpsertBatch([]*proto.Stats{selfSampler()})
 
 	// === gRPC server (Join solo sui seed; Ping/PingReq/ExchangeAvail su tutti) ===
-	lis, err := net.Listen("tcp", grpcAddr)
+
+	// (variabili per gestione crash/recovery)
+	var (
+		s   *grpc.Server
+		lis net.Listener
+		reg *seed.Registry
+	)
+
+	// === gRPC server (Join sui seed; Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel su tutti) ===
+	s, lis, reg, err = startGRPCServer(
+		isSeed,
+		grpcAddr,
+		log,
+		clock,
+		mgr,
+		id,
+		func(max int) []*proto.Stats { return engine.LocalSample(max) },
+		func() *proto.Stats {
+			s := n.CurrentStatsProto()
+			s.TsMs = clock.NowSim().UnixMilli()
+			return s
+		},
+		func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
+			return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
+		},
+		func(jobID string) bool {
+			return n.CancelJob(jobID)
+		},
+		r,
+	)
 	if err != nil {
-		log.Errorf("listen %s: %v", grpcAddr, err)
+		log.Errorf("startGRPCServer: %v", err)
 		return
 	}
-	s := grpc.NewServer()
 
-	if isSeed {
-		reg := seed.NewRegistry(r)
-		// registra il seed nel registry (così può essere restituito nei campioni)
-		reg.UpsertPeer(&proto.PeerInfo{NodeId: id, Addr: grpcAddr, IsSeed: true})
-
-		srv := seed.NewServer(
-			true, reg, log, clock, mgr, id,
-			func(max int) []*proto.Stats { return engine.LocalSample(max) }, // sampler anti-entropy
-			func() *proto.Stats { // selfStatsFn per Probe
-				s := n.CurrentStatsProto()
-				s.TsMs = clock.NowSim().UnixMilli()
-				return s
-			},
-			func(jobID string, cpu, mem, gpu float64, durMs int64) bool { // applyCommitFn
-				return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
-			},
-			func(jobID string) bool { // cancelFn
-				return n.CancelJob(jobID)
-			},
-		)
-
-		proto.RegisterGossipServer(s, srv)
-
-		if cfg.Workload.Enabled {
-			startSeedCoordinator(log, clock, r, cfg, reg, id)
-		}
-
-		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail pronti)", grpcAddr)
-	} else {
-		// server che espone Ping/PingReq/ExchangeAvail; Join restituisce Unimplemented
-		srv := seed.NewServer(
-			false, nil, log, clock, mgr, id,
-			func(max int) []*proto.Stats { return engine.LocalSample(max) }, // sampler anti-entropy
-			func() *proto.Stats {
-				s := n.CurrentStatsProto()
-				s.TsMs = clock.NowSim().UnixMilli()
-				return s
-			},
-			func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
-				return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
-			},
-			func(jobID string) bool {
-				return n.CancelJob(jobID)
-			},
-		)
-
-		proto.RegisterGossipServer(s, srv)
-		log.Infof("Peer non-seed su %s (Ping/PingReq/ExchangeAvail pronti)", grpcAddr)
+	// Se sei seed e il workload è abilitato, avvia il coordinator come già facevi
+	if isSeed && cfg.Workload.Enabled {
+		startSeedCoordinator(log, clock, r, cfg, reg, id)
 	}
 
-	go func() {
-		if err := s.Serve(lis); err != nil {
-			log.Errorf("gRPC Serve: %v", err)
+	// === Crash & Recovery (simulazione fault) ===
+	if cfg.Faults.Enabled {
+		p := cfg.Faults.CrashProbPerMinSim
+		meanUp := 1.0e9
+		if p > 0 {
+			meanUp = 60.0 / p
 		}
-	}()
+		par := faults.Params{
+			Enabled:          true,
+			FailureProb:      0.0,
+			MeanUpSimS:       meanUp,
+			MeanDownSimS:     30.0,
+			FlapProb:         0.0,
+			PrintTransitions: false,
+		}
 
+		onDown := func() {
+			log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
+			stopGRPCServer(s, lis, log)
+			if reporter != nil {
+				reporter.Stop()
+			}
+			if engine != nil {
+				engine.Stop()
+			}
+			if mgr != nil {
+				mgr.Stop()
+			}
+		}
+
+		onUp := func() {
+			log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
+			// Ricrea SWIM manager con i parametri che usi all'avvio
+			swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
+			mgr = swim.NewManager(id, grpcAddr, log, clock, r, swimCfg)
+			mgr.Start()
+
+			// Ricrea Anti-Entropy Engine (riusa store; selfSampler è già definito)
+			aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
+			engine = antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
+			engine.Start()
+
+			// Reporter (snapshot periodiche)
+			repCfg := antientropy.ReporterConfig{PeriodSimS: 10.0, TopK: 3}
+			reporter = antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
+			reporter.Start()
+
+			// Server gRPC nuovo
+			var err error
+			s, lis, reg, err = startGRPCServer(
+				isSeed, grpcAddr, log, clock, mgr, id,
+				func(max int) []*proto.Stats { return engine.LocalSample(max) },
+				func() *proto.Stats { s := n.CurrentStatsProto(); s.TsMs = clock.NowSim().UnixMilli(); return s },
+				func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
+					return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
+				},
+				func(jobID string) bool { return n.CancelJob(jobID) },
+				r,
+			)
+			if err != nil {
+				log.Errorf("startGRPCServer (recovery) failed: %v", err)
+			}
+
+			// Riprova il JOIN se non-seed
+			if !isSeed && seedsCSV != "" {
+				jc := seed.NewJoinClient(log, clock)
+				pcts := n.PublishedPercentages()
+				req := &proto.JoinRequest{
+					NodeId: n.ID, Addr: grpcAddr, Incarnation: uint64(time.Now().UnixMilli()),
+					MyStats: &proto.Stats{NodeId: n.ID, CpuPct: pcts.CPU, MemPct: pcts.MEM, GpuPct: pcts.GPU, TsMs: clock.NowSimMs()},
+				}
+				if rep, seedAddr, err := jc.TryJoin(seedsCSV, req); err != nil {
+					log.Warnf("JOIN post-recovery fallito: %v", err)
+				} else {
+					log.Infof("JOIN post-recovery OK via %s — peers=%d stats=%d", seedAddr, len(rep.Peers), len(rep.StatsSnapshot))
+					if len(rep.StatsSnapshot) > 0 {
+						store.UpsertBatch(rep.StatsSnapshot)
+					}
+				}
+			} else if isSeed && reg != nil {
+				reg.UpsertPeer(&proto.PeerInfo{NodeId: id, Addr: grpcAddr, IsSeed: true})
+			}
+		}
+
+		fsim := faults.NewSim(log, clock, r, par, faults.Hooks{OnDown: onDown, OnUp: onUp})
+		fsim.Start()
+	}
 	// === Delay di ingresso (ondate) ===
 	if bootDelaySim > 0 {
 		log.Infof("Attendo BOOT_DELAY_SIM_S=%.1f (tempo SIM) prima del Join…", bootDelaySim)

@@ -91,6 +91,13 @@ type Faults struct {
 	DropCommitProb     float64 `json:"drop_commit_prob"`
 }
 
+type FaultsConfig struct {
+	Enabled            bool    `json:"enabled"`
+	UptimeMeanSimSec   float64 `json:"uptime_mean_sim_s"`   // media uptime (secondi simulati)
+	DowntimeMeanSimSec float64 `json:"downtime_mean_sim_s"` // media downtime (secondi simulati)
+	JitterPct          float64 `json:"jitter_pct"`          // 0.0 .. 0.5 tipicamente (10% = 0.10)
+}
+
 // ===== Loader + defaults =====
 
 func Load(path string) (*Config, error) {
