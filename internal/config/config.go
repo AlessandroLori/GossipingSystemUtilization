@@ -83,19 +83,48 @@ type Scheduler struct {
 	ProbeTimeoutRealMs int `json:"probe_timeout_real_ms"`
 }
 
-// ===== Faults (placeholder per step futuri) =====
+// ===== Faults =====
 
+// Classi e parametri come concordato
 type Faults struct {
-	Enabled            bool    `json:"enabled"`
-	CrashProbPerMinSim float64 `json:"crash_prob_per_min_sim"`
-	DropCommitProb     float64 `json:"drop_commit_prob"`
+	Enabled          bool `json:"enabled"`
+	PrintTransitions bool `json:"print_transitions"`
+
+	// Distribuzione classi di FREQUENZA (quanto spesso cade)
+	// chiavi: "high","medium","low","none"
+	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights"`
+	// Probabilità di crash per minuto simulato per classe
+	FrequencyPerMinSim map[string]float64 `json:"frequency_per_min_sim"`
+
+	// Distribuzione classi di DURATA (quanto dura il fault)
+	// chiavi: "grave","medium","small"
+	DurationClassWeights map[string]float64 `json:"duration_class_weights"`
+	// Media downtime (secondi simulati) per classe
+	DurationMeanSimS map[string]float64 `json:"duration_mean_sim_s"`
 }
 
-type FaultsConfig struct {
-	Enabled            bool    `json:"enabled"`
-	UptimeMeanSimSec   float64 `json:"uptime_mean_sim_s"`   // media uptime (secondi simulati)
-	DowntimeMeanSimSec float64 `json:"downtime_mean_sim_s"` // media downtime (secondi simulati)
-	JitterPct          float64 `json:"jitter_pct"`          // 0.0 .. 0.5 tipicamente (10% = 0.10)
+func (c *Config) applyFaultsDefaults() {
+	// Distribuzioni default se mancanti
+	if len(c.Faults.FrequencyClassWeights) == 0 {
+		c.Faults.FrequencyClassWeights = map[string]float64{
+			"high": 0.10, "medium": 0.25, "low": 0.55, "none": 0.10,
+		}
+	}
+	if len(c.Faults.FrequencyPerMinSim) == 0 {
+		c.Faults.FrequencyPerMinSim = map[string]float64{
+			"high": 0.30, "medium": 0.06, "low": 0.012, "none": 0.0,
+		}
+	}
+	if len(c.Faults.DurationClassWeights) == 0 {
+		c.Faults.DurationClassWeights = map[string]float64{
+			"grave": 0.10, "medium": 0.60, "small": 0.30,
+		}
+	}
+	if len(c.Faults.DurationMeanSimS) == 0 {
+		c.Faults.DurationMeanSimS = map[string]float64{
+			"grave": 300, "medium": 60, "small": 15,
+		}
+	}
 }
 
 // ===== Loader + defaults =====
@@ -105,11 +134,15 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
-	c.applyDefaults()
+
+	c.applyDefaults()       // la tua già esistente
+	c.applyFaultsDefaults() // <— aggiunta per i fault
+
 	return &c, nil
 }
 

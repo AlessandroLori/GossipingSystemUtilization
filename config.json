@@ -69,11 +69,34 @@
   },
 
   "faults": {
-    "enabled": false,
-    "failure_probability": 0.0,    
-    "mean_uptime_sim_s": 600.0,
-    "mean_downtime_sim_s": 30.0,
-    "flap_probability": 0.0,
-    "print_transitions": true
+  "enabled": true,
+  "print_transitions": true,
+
+  "frequency_class_weights": {
+    "high":   0.10,
+    "medium": 0.25,
+    "low":    0.55,
+    "none":   0.10
+  },
+
+  "frequency_per_min_sim": {
+    "high":   0.30,
+    "medium": 0.06,
+    "low":    0.012,
+    "none":   0.0
+  },
+
+  "duration_class_weights": {
+    "grave":  0.10,
+    "medium": 0.60,
+    "small":  0.30
+  },
+
+  "duration_mean_sim_s": {
+    "grave":  300,
+    "medium": 60,
+    "small":  15
   }
+}
+
 }

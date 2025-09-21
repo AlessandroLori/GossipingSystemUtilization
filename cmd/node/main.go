@@ -202,7 +202,7 @@ func main() {
 	bgMed := getBG("medium")
 	bgStr := getBG("powerful")
 
-	// Crea e inizializza il nodo (stampe Step 4)
+	// Crea e inizializza il nodo
 	n := node.New(id, "0.0.0.0:0", clock, log, r)
 	n.Init(pc, caps, bgWeak, bgMed, bgStr)
 
@@ -293,21 +293,9 @@ func main() {
 	}
 
 	// === Crash & Recovery (simulazione fault) ===
+	// NOTE: qui agganciamo la fault-sim "appena crei il nodo" (cioè subito dopo aver avviato i servizi base).
+	// Non leggiamo campi extra dal config (solo Enabled), il profilo è auto-generato con default interni.
 	if cfg.Faults.Enabled {
-		p := cfg.Faults.CrashProbPerMinSim
-		meanUp := 1.0e9
-		if p > 0 {
-			meanUp = 60.0 / p
-		}
-		par := faults.Params{
-			Enabled:          true,
-			FailureProb:      0.0,
-			MeanUpSimS:       meanUp,
-			MeanDownSimS:     30.0,
-			FlapProb:         0.0,
-			PrintTransitions: false,
-		}
-
 		onDown := func() {
 			log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
 			stopGRPCServer(s, lis, log)
@@ -376,9 +364,17 @@ func main() {
 			}
 		}
 
-		fsim := faults.NewSim(log, clock, r, par, faults.Hooks{OnDown: onDown, OnUp: onUp})
+		// >>> QUI: inizializzo la Sim dei fault con profilo auto-generato (nessun campo extra richiesto dal config)
+		_, fsim := faults.InitSimAuto(
+			log,
+			clock,
+			r,    // rng (puoi passare nil per seed time-based)
+			true, // printTransitions: puoi metterlo a false se vuoi meno log
+			faults.Hooks{OnDown: onDown, OnUp: onUp},
+		)
 		fsim.Start()
 	}
+
 	// === Delay di ingresso (ondate) ===
 	if bootDelaySim > 0 {
 		log.Infof("Attendo BOOT_DELAY_SIM_S=%.1f (tempo SIM) prima del Join…", bootDelaySim)
