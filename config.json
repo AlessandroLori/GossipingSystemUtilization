@@ -68,35 +68,14 @@
     "print_decisions": true
   },
 
-  "faults": {
+"faults": {
   "enabled": true,
   "print_transitions": true,
-
-  "frequency_class_weights": {
-    "high":   0.10,
-    "medium": 0.25,
-    "low":    0.55,
-    "none":   0.10
-  },
-
-  "frequency_per_min_sim": {
-    "high":   0.30,
-    "medium": 0.06,
-    "low":    0.012,
-    "none":   0.0
-  },
-
-  "duration_class_weights": {
-    "grave":  0.10,
-    "medium": 0.60,
-    "small":  0.30
-  },
-
-  "duration_mean_sim_s": {
-    "grave":  300,
-    "medium": 60,
-    "small":  15
-  }
+  "frequency_class_weights": { "high": 0.15, "medium": 0.35, "low": 0.40, "none": 0.10 },
+  "frequency_per_min_sim":   { "high": 1.2,  "medium": 0.4,  "low": 0.1,  "none": 0.0  },
+  "duration_class_weights":  { "grave": 0.15, "medium": 0.50, "small": 0.35 },
+  "duration_mean_sim_s":     { "grave": 60,   "medium": 20,   "small": 5   }
 }
+
 
 }

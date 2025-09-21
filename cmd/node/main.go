@@ -293,86 +293,116 @@ func main() {
 	}
 
 	// === Crash & Recovery (simulazione fault) ===
-	// NOTE: qui agganciamo la fault-sim "appena crei il nodo" (cioè subito dopo aver avviato i servizi base).
-	// Non leggiamo campi extra dal config (solo Enabled), il profilo è auto-generato con default interni.
-	if cfg.Faults.Enabled {
-		onDown := func() {
-			log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
-			stopGRPCServer(s, lis, log)
-			if reporter != nil {
-				reporter.Stop()
+	// Legge i parametri dai "buckets" in cfg.Faults (classi/pesi/frequenze/durate) e inizializza la fault-sim.
+	{
+		// helper per *bool → bool con default
+		boolv := func(p *bool, def bool) bool {
+			if p != nil {
+				return *p
 			}
-			if engine != nil {
-				engine.Stop()
-			}
-			if mgr != nil {
-				mgr.Stop()
-			}
+			return def
 		}
 
-		onUp := func() {
-			log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
-			// Ricrea SWIM manager con i parametri che usi all'avvio
-			swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
-			mgr = swim.NewManager(id, grpcAddr, log, clock, r, swimCfg)
-			mgr.Start()
+		// Adattatore per la firma di faults.InitSimWithProfile (struct anonimo compatibile)
+		fdef := struct {
+			Enabled               bool
+			PrintTransitions      bool
+			FrequencyClassWeights map[string]float64
+			FrequencyPerMinSim    map[string]float64
+			DurationClassWeights  map[string]float64
+			DurationMeanSimS      map[string]float64
+		}{
+			Enabled:               boolv(cfg.Faults.Enabled, false),
+			PrintTransitions:      boolv(cfg.Faults.PrintTransitions, false),
+			FrequencyClassWeights: cfg.Faults.FrequencyClassWeights,
+			FrequencyPerMinSim:    cfg.Faults.FrequencyPerMinSim,
+			DurationClassWeights:  cfg.Faults.DurationClassWeights,
+			DurationMeanSimS:      cfg.Faults.DurationMeanSimS,
+		}
 
-			// Ricrea Anti-Entropy Engine (riusa store; selfSampler è già definito)
-			aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
-			engine = antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
-			engine.Start()
-
-			// Reporter (snapshot periodiche)
-			repCfg := antientropy.ReporterConfig{PeriodSimS: 10.0, TopK: 3}
-			reporter = antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
-			reporter.Start()
-
-			// Server gRPC nuovo
-			var err error
-			s, lis, reg, err = startGRPCServer(
-				isSeed, grpcAddr, log, clock, mgr, id,
-				func(max int) []*proto.Stats { return engine.LocalSample(max) },
-				func() *proto.Stats { s := n.CurrentStatsProto(); s.TsMs = clock.NowSim().UnixMilli(); return s },
-				func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
-					return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
-				},
-				func(jobID string) bool { return n.CancelJob(jobID) },
-				r,
-			)
-			if err != nil {
-				log.Errorf("startGRPCServer (recovery) failed: %v", err)
+		if fdef.Enabled {
+			onDown := func() {
+				log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
+				stopGRPCServer(s, lis, log)
+				if reporter != nil {
+					reporter.Stop()
+				}
+				if engine != nil {
+					engine.Stop()
+				}
+				if mgr != nil {
+					mgr.Stop()
+				}
 			}
 
-			// Riprova il JOIN se non-seed
-			if !isSeed && seedsCSV != "" {
-				jc := seed.NewJoinClient(log, clock)
-				pcts := n.PublishedPercentages()
-				req := &proto.JoinRequest{
-					NodeId: n.ID, Addr: grpcAddr, Incarnation: uint64(time.Now().UnixMilli()),
-					MyStats: &proto.Stats{NodeId: n.ID, CpuPct: pcts.CPU, MemPct: pcts.MEM, GpuPct: pcts.GPU, TsMs: clock.NowSimMs()},
+			onUp := func() {
+				log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
+				// Ricrea SWIM manager con i parametri che usi all'avvio
+				swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
+				mgr = swim.NewManager(id, grpcAddr, log, clock, r, swimCfg)
+				mgr.Start()
+
+				// Ricrea Anti-Entropy Engine (riusa store; selfSampler è già definito)
+				aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
+				engine = antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
+				engine.Start()
+
+				// Reporter (snapshot periodiche)
+				repCfg := antientropy.ReporterConfig{PeriodSimS: 10.0, TopK: 3}
+				reporter = antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
+				reporter.Start()
+
+				// Server gRPC nuovo
+				var err error
+				s, lis, reg, err = startGRPCServer(
+					isSeed, grpcAddr, log, clock, mgr, id,
+					func(max int) []*proto.Stats { return engine.LocalSample(max) },
+					func() *proto.Stats {
+						s := n.CurrentStatsProto()
+						s.TsMs = clock.NowSim().UnixMilli()
+						return s
+					},
+					func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
+						return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
+					},
+					func(jobID string) bool { return n.CancelJob(jobID) },
+					r,
+				)
+				if err != nil {
+					log.Errorf("startGRPCServer (recovery) failed: %v", err)
 				}
-				if rep, seedAddr, err := jc.TryJoin(seedsCSV, req); err != nil {
-					log.Warnf("JOIN post-recovery fallito: %v", err)
-				} else {
-					log.Infof("JOIN post-recovery OK via %s — peers=%d stats=%d", seedAddr, len(rep.Peers), len(rep.StatsSnapshot))
-					if len(rep.StatsSnapshot) > 0 {
-						store.UpsertBatch(rep.StatsSnapshot)
+
+				// Riprova il JOIN se non-seed
+				if !isSeed && seedsCSV != "" {
+					jc := seed.NewJoinClient(log, clock)
+					pcts := n.PublishedPercentages()
+					req := &proto.JoinRequest{
+						NodeId: n.ID, Addr: grpcAddr, Incarnation: uint64(time.Now().UnixMilli()),
+						MyStats: &proto.Stats{NodeId: n.ID, CpuPct: pcts.CPU, MemPct: pcts.MEM, GpuPct: pcts.GPU, TsMs: clock.NowSimMs()},
 					}
+					if rep, seedAddr, err := jc.TryJoin(seedsCSV, req); err != nil {
+						log.Warnf("JOIN post-recovery fallito: %v", err)
+					} else {
+						log.Infof("JOIN post-recovery OK via %s — peers=%d stats=%d", seedAddr, len(rep.Peers), len(rep.StatsSnapshot))
+						if len(rep.StatsSnapshot) > 0 {
+							store.UpsertBatch(rep.StatsSnapshot)
+						}
+					}
+				} else if isSeed && reg != nil {
+					reg.UpsertPeer(&proto.PeerInfo{NodeId: id, Addr: grpcAddr, IsSeed: true})
 				}
-			} else if isSeed && reg != nil {
-				reg.UpsertPeer(&proto.PeerInfo{NodeId: id, Addr: grpcAddr, IsSeed: true})
 			}
-		}
 
-		// >>> QUI: inizializzo la Sim dei fault con profilo auto-generato (nessun campo extra richiesto dal config)
-		_, fsim := faults.InitSimAuto(
-			log,
-			clock,
-			r,    // rng (puoi passare nil per seed time-based)
-			true, // printTransitions: puoi metterlo a false se vuoi meno log
-			faults.Hooks{OnDown: onDown, OnUp: onUp},
-		)
-		fsim.Start()
+			// Inizializza e avvia la fault-sim basata sui buckets del config
+			_, fsim := faults.InitSimWithProfile(
+				log,
+				clock,
+				r,
+				fdef,
+				faults.Hooks{OnDown: onDown, OnUp: onUp},
+			)
+			fsim.Start()
+		}
 	}
 
 	// === Delay di ingresso (ondate) ===

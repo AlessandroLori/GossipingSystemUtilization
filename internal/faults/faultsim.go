@@ -56,10 +56,9 @@ func (s *Sim) loop() {
 	// Estrai stato iniziale
 	down := s.rnd.Float64() < s.par.FailureProb
 
-	// **NOVITÀ**: non generare un "UP" spurio alla partenza.
-	// Se partiamo UP (down=false), NON chiamiamo apply(); se partiamo DOWN, sì.
+	// Non generare un "UP" spurio alla partenza.
 	if down {
-		s.apply(true) // crash immediato al boot, se configurato/estratto
+		s.apply(true)
 	}
 	prev := down
 
@@ -83,7 +82,7 @@ func (s *Sim) loop() {
 			down = !down
 		}
 
-		// **NOVITÀ**: notifica solo su transizione reale
+		// notifica solo su transizione reale
 		if down != prev {
 			s.apply(down)
 			prev = down
@@ -132,6 +131,46 @@ type NodeFaultProfile struct {
 	DownTimeMeanSimS   float64 // durata media di ciascun guasto (secondi simulati)
 }
 
+// [NUOVO] AutoProfileDef: profilo “a buckets” (nuovo JSON o compat legacy)
+type AutoProfileDef struct {
+	Enabled               bool
+	PrintTransitions      bool
+	FrequencyClassWeights map[string]float64 // none/low/medium/high → peso
+	FrequencyPerMinSim    map[string]float64 // none/low/medium/high → λ crash/min
+	DurationClassWeights  map[string]float64 // small/medium/grave → peso
+	DurationMeanSimS      map[string]float64 // small/medium/grave → mean down (s)
+}
+
+// [NUOVO] default robusti
+func DefaultAutoProfile(printTransitions bool) AutoProfileDef {
+	return AutoProfileDef{
+		Enabled:          true,
+		PrintTransitions: printTransitions,
+		FrequencyClassWeights: map[string]float64{
+			"high":   0.15,
+			"medium": 0.35,
+			"low":    0.40,
+			"none":   0.10,
+		},
+		FrequencyPerMinSim: map[string]float64{
+			"high":   1.2,
+			"medium": 0.4,
+			"low":    0.1,
+			"none":   0.0,
+		},
+		DurationClassWeights: map[string]float64{
+			"grave":  0.15,
+			"medium": 0.50,
+			"small":  0.35,
+		},
+		DurationMeanSimS: map[string]float64{
+			"grave":  60.0,
+			"medium": 20.0,
+			"small":  5.0,
+		},
+	}
+}
+
 // pickWeighted: estrae una chiave da una mappa pesata {classe: peso}
 func pickWeighted(m map[string]float64, r *rand.Rand) string {
 	total := 0.0
@@ -175,26 +214,19 @@ func safeGetFloat(m map[string]float64, key string) float64 {
 	return 0
 }
 
-// DrawNodeFaultProfile: dato il blocco cfg.Faults, estrae classi freq/dur e produce il profilo numerico del nodo
-func DrawNodeFaultProfile(cfg struct {
-	Enabled               bool
-	PrintTransitions      bool
-	FrequencyClassWeights map[string]float64
-	FrequencyPerMinSim    map[string]float64
-	DurationClassWeights  map[string]float64
-	DurationMeanSimS      map[string]float64
-}, r *rand.Rand) NodeFaultProfile {
+// DrawNodeFaultProfile: dato l'AutoProfileDef, estrae classi freq/dur e produce il profilo numerico del nodo
+func DrawNodeFaultProfile(def AutoProfileDef, r *rand.Rand) NodeFaultProfile {
 	if r == nil {
 		r = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
-	freqClass := pickWeighted(cfg.FrequencyClassWeights, r) // "high" | "medium" | "low" | "none"
-	durClass := pickWeighted(cfg.DurationClassWeights, r)   // "grave" | "medium" | "small"
+	freqClass := pickWeighted(def.FrequencyClassWeights, r) // "high" | "medium" | "low" | "none"
+	durClass := pickWeighted(def.DurationClassWeights, r)   // "grave" | "medium" | "small"
 
 	return NodeFaultProfile{
 		FreqClass:          freqClass,
 		DurClass:           durClass,
-		CrashProbPerMinSim: safeGetFloat(cfg.FrequencyPerMinSim, freqClass),
-		DownTimeMeanSimS:   safeGetFloat(cfg.DurationMeanSimS, durClass),
+		CrashProbPerMinSim: safeGetFloat(def.FrequencyPerMinSim, freqClass),
+		DownTimeMeanSimS:   safeGetFloat(def.DurationMeanSimS, durClass),
 	}
 }
 
@@ -225,25 +257,18 @@ func InitSimWithProfile(
 	log *logx.Logger,
 	clock *simclock.Clock,
 	r *rand.Rand,
-	cfg struct {
-		Enabled               bool
-		PrintTransitions      bool
-		FrequencyClassWeights map[string]float64
-		FrequencyPerMinSim    map[string]float64
-		DurationClassWeights  map[string]float64
-		DurationMeanSimS      map[string]float64
-	},
+	def AutoProfileDef,
 	hooks Hooks,
 ) (NodeFaultProfile, *Sim) {
 	if r == nil {
 		r = rand.New(rand.NewSource(time.Now().UnixNano()))
 	}
 
-	profile := DrawNodeFaultProfile(cfg, r)
-	par := BuildParamsFromProfile(profile, cfg.PrintTransitions)
-	par.Enabled = cfg.Enabled
+	profile := DrawNodeFaultProfile(def, r)
+	par := BuildParamsFromProfile(profile, def.PrintTransitions)
+	par.Enabled = def.Enabled
 
-	// **NOVITÀ**: logga il profilo completo all’istanziazione del nodo
+	// Log del profilo completo all’istanziazione del nodo
 	meanUp := par.MeanUpSimS
 	log.Infof("FAULT PROFILE → freqClass=%s (λ≈%.3f crash/min), durClass=%s (meanDown=%.1fs), meanUp=%.1fs",
 		profile.FreqClass,
@@ -265,39 +290,6 @@ func InitSimAuto(
 	printTransitions bool,
 	hooks Hooks,
 ) (NodeFaultProfile, *Sim) {
-	def := struct {
-		Enabled               bool
-		PrintTransitions      bool
-		FrequencyClassWeights map[string]float64
-		FrequencyPerMinSim    map[string]float64
-		DurationClassWeights  map[string]float64
-		DurationMeanSimS      map[string]float64
-	}{
-		Enabled:          true,
-		PrintTransitions: printTransitions,
-		FrequencyClassWeights: map[string]float64{
-			"high":   0.15,
-			"medium": 0.35,
-			"low":    0.40,
-			"none":   0.10,
-		},
-		FrequencyPerMinSim: map[string]float64{
-			"high":   1.2,
-			"medium": 0.4,
-			"low":    0.1,
-			"none":   0.0,
-		},
-		DurationClassWeights: map[string]float64{
-			"grave":  0.15,
-			"medium": 0.50,
-			"small":  0.35,
-		},
-		DurationMeanSimS: map[string]float64{
-			"grave":  60.0,
-			"medium": 20.0,
-			"small":  5.0,
-		},
-	}
-
+	def := DefaultAutoProfile(printTransitions)
 	return InitSimWithProfile(log, clock, r, def, hooks)
 }

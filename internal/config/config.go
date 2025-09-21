@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"os"
+
+	"GossipSystemUtilization/internal/faults"
 )
 
 // ===== Top-level =====
@@ -15,8 +17,7 @@ type Config struct {
 	// Nuove sezioni guidate da config.json
 	Workload  Workload  `json:"workload"`
 	Scheduler Scheduler `json:"scheduler"`
-	// Faults li lasciamo già definiti per eventuali step futuri; non sono obbligatori nel JSON
-	Faults Faults `json:"faults"`
+	Faults    Faults    `json:"faults"`
 }
 
 // ===== Simulation =====
@@ -85,49 +86,27 @@ type Scheduler struct {
 
 // ===== Faults =====
 
-// Classi e parametri come concordato
+// Supporto NUOVO + LEGACY
 type Faults struct {
-	Enabled          bool `json:"enabled"`
-	PrintTransitions bool `json:"print_transitions"`
+	Enabled          *bool `json:"enabled,omitempty"`
+	PrintTransitions *bool `json:"print_transitions,omitempty"`
 
-	// Distribuzione classi di FREQUENZA (quanto spesso cade)
-	// chiavi: "high","medium","low","none"
-	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights"`
-	// Probabilità di crash per minuto simulato per classe
-	FrequencyPerMinSim map[string]float64 `json:"frequency_per_min_sim"`
+	// --- NUOVO formato "a buckets" ---
+	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights,omitempty"`
+	FrequencyPerMinSim    map[string]float64 `json:"frequency_per_min_sim,omitempty"`
+	DurationClassWeights  map[string]float64 `json:"duration_class_weights,omitempty"`
+	DurationMeanSimS      map[string]float64 `json:"duration_mean_sim_s,omitempty"`
 
-	// Distribuzione classi di DURATA (quanto dura il fault)
-	// chiavi: "grave","medium","small"
-	DurationClassWeights map[string]float64 `json:"duration_class_weights"`
-	// Media downtime (secondi simulati) per classe
-	DurationMeanSimS map[string]float64 `json:"duration_mean_sim_s"`
+	// --- LEGACY ---
+	// Esempio: {"rangepct": {"none":0.1,"low":0.4,"medium":0.35,"high":0.15}}
+	RangePct map[string]float64 `json:"rangepct,omitempty"`
+	// Esempio: {"durationrange": {"small":5,"medium":20,"grave":60}}
+	DurationRange map[string]float64 `json:"durationrange,omitempty"`
+	// opzionale legacy: singolo λ globale
+	FreqPerMinSim *float64 `json:"freq_per_min_sim,omitempty"`
 }
 
-func (c *Config) applyFaultsDefaults() {
-	// Distribuzioni default se mancanti
-	if len(c.Faults.FrequencyClassWeights) == 0 {
-		c.Faults.FrequencyClassWeights = map[string]float64{
-			"high": 0.10, "medium": 0.25, "low": 0.55, "none": 0.10,
-		}
-	}
-	if len(c.Faults.FrequencyPerMinSim) == 0 {
-		c.Faults.FrequencyPerMinSim = map[string]float64{
-			"high": 0.30, "medium": 0.06, "low": 0.012, "none": 0.0,
-		}
-	}
-	if len(c.Faults.DurationClassWeights) == 0 {
-		c.Faults.DurationClassWeights = map[string]float64{
-			"grave": 0.10, "medium": 0.60, "small": 0.30,
-		}
-	}
-	if len(c.Faults.DurationMeanSimS) == 0 {
-		c.Faults.DurationMeanSimS = map[string]float64{
-			"grave": 300, "medium": 60, "small": 15,
-		}
-	}
-}
-
-// ===== Loader + defaults =====
+// ===== Loader =====
 
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
@@ -140,8 +119,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	c.applyDefaults()       // la tua già esistente
-	c.applyFaultsDefaults() // <— aggiunta per i fault
+	c.applyDefaults() // defaults non-faults
 
 	return &c, nil
 }
@@ -163,7 +141,7 @@ func (c *Config) applyDefaults() {
 	if c.Workload.JobMEM.MaxPct == 0 && c.Workload.JobMEM.MinPct == 0 {
 		c.Workload.JobMEM = RangePct{MinPct: 3, MaxPct: 12}
 	}
-	// GPU opzionale: se non presente resta 0-0 (nessun carico GPU)
+	// GPU opzionale
 	// Durata default 10-30s simulati
 	if c.Workload.JobDurationSimS.MinS == 0 && c.Workload.JobDurationSimS.MaxS == 0 {
 		c.Workload.JobDurationSimS = DurationRange{MinS: 10, MaxS: 30}
@@ -175,5 +153,88 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Scheduler.ProbeTimeoutRealMs <= 0 {
 		c.Scheduler.ProbeTimeoutRealMs = 300
+	}
+}
+
+// ===== Traduzione Faults → faults.AutoProfileDef =====
+
+func (c *Config) ToFaultsAutoProfileDef() faults.AutoProfileDef {
+	def := faults.DefaultAutoProfile(false)
+
+	// flags base
+	if c.Faults.PrintTransitions != nil {
+		def.PrintTransitions = *c.Faults.PrintTransitions
+	}
+	if c.Faults.Enabled != nil {
+		def.Enabled = *c.Faults.Enabled
+	}
+
+	// Caso 1: NUOVO formato → copia diretto se presente
+	if len(c.Faults.FrequencyClassWeights) > 0 {
+		def.FrequencyClassWeights = copyMap(c.Faults.FrequencyClassWeights, def.FrequencyClassWeights)
+	}
+	if len(c.Faults.FrequencyPerMinSim) > 0 {
+		def.FrequencyPerMinSim = copyMap(c.Faults.FrequencyPerMinSim, def.FrequencyPerMinSim)
+	}
+	if len(c.Faults.DurationClassWeights) > 0 {
+		def.DurationClassWeights = copyMap(c.Faults.DurationClassWeights, def.DurationClassWeights)
+	}
+	if len(c.Faults.DurationMeanSimS) > 0 {
+		def.DurationMeanSimS = copyMap(c.Faults.DurationMeanSimS, def.DurationMeanSimS)
+	}
+
+	// Caso 2: LEGACY → mappe su buckets
+	if len(c.Faults.RangePct) > 0 {
+		for _, k := range []string{"none", "low", "medium", "high"} {
+			if v, ok := c.Faults.RangePct[k]; ok {
+				def.FrequencyClassWeights[k] = v
+			}
+		}
+		normWeights(def.FrequencyClassWeights)
+	}
+	if len(c.Faults.DurationRange) > 0 {
+		for _, k := range []string{"small", "medium", "grave"} {
+			if v, ok := c.Faults.DurationRange[k]; ok && v > 0 {
+				def.DurationMeanSimS[k] = v
+			}
+		}
+		// se vuoi derivare anche pesi durata da qualcos'altro, lasciare i default è ok
+	}
+	if c.Faults.FreqPerMinSim != nil && len(c.Faults.FrequencyPerMinSim) == 0 {
+		lambda := *c.Faults.FreqPerMinSim
+		def.FrequencyPerMinSim["none"] = 0.0
+		def.FrequencyPerMinSim["low"] = lambda * 0.25
+		def.FrequencyPerMinSim["medium"] = lambda * 1.0
+		def.FrequencyPerMinSim["high"] = lambda * 3.0
+	}
+
+	return def
+}
+
+// --- helpers locali ---
+
+func copyMap(src, dst map[string]float64) map[string]float64 {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]float64, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func normWeights(m map[string]float64) {
+	var sum float64
+	for _, v := range m {
+		sum += v
+	}
+	if sum <= 0 {
+		return
+	}
+	for k, v := range m {
+		m[k] = v / sum
 	}
 }
