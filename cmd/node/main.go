@@ -14,12 +14,14 @@ import (
 	"GossipSystemUtilization/internal/antientropy"
 	"GossipSystemUtilization/internal/config"
 	"GossipSystemUtilization/internal/faults"
+	"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/model"
 	"GossipSystemUtilization/internal/node"
 	"GossipSystemUtilization/internal/seed"
 	"GossipSystemUtilization/internal/simclock"
 	"GossipSystemUtilization/internal/swim"
+
 	proto "GossipSystemUtilization/proto"
 
 	mrand "math/rand"
@@ -27,72 +29,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
-
-// --- helpers: gRPC start/stop (crash & recovery friendly) ---
-func startGRPCServer(
-	isSeed bool,
-	grpcAddr string,
-	log *logx.Logger,
-	clock *simclock.Clock,
-	mgr *swim.Manager,
-	myID string,
-	sampler seed.Sampler,
-	selfStatsFn func() *proto.Stats,
-	applyCommitFn func(string, float64, float64, float64, int64) bool,
-	cancelFn func(string) bool,
-	r *mrand.Rand,
-) (s *grpc.Server, lis net.Listener, reg *seed.Registry, err error) {
-
-	lis, err = net.Listen("tcp", grpcAddr)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("listen %s: %w", grpcAddr, err)
-	}
-	s = grpc.NewServer()
-
-	if isSeed {
-		reg = seed.NewRegistry(r)
-		reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: true})
-	}
-
-	srv := seed.NewServer(
-		isSeed,
-		reg,
-		log,
-		clock,
-		mgr,
-		myID,
-		sampler,
-		selfStatsFn,
-		applyCommitFn,
-		cancelFn,
-	)
-	proto.RegisterGossipServer(s, srv)
-
-	go func() {
-		if err := s.Serve(lis); err != nil {
-			log.Errorf("gRPC Serve: %v", err)
-		}
-	}()
-
-	if isSeed {
-		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
-	} else {
-		log.Infof("Peer non-seed su %s (Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
-	}
-
-	return s, lis, reg, nil
-}
-
-// stopGRPCServer: ferma il server gRPC e chiude il listener (idempotente)
-func stopGRPCServer(s *grpc.Server, lis net.Listener, log *logx.Logger) {
-	if s != nil {
-		s.Stop()
-	}
-	if lis != nil {
-		_ = lis.Close()
-	}
-	log.Warnf("gRPC fermato (server e listener chiusi)")
-}
 
 func newNodeID() string {
 	b := make([]byte, 6)
@@ -261,7 +197,7 @@ func main() {
 	)
 
 	// === gRPC server (Join sui seed; Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel su tutti) ===
-	s, lis, reg, err = startGRPCServer(
+	s, lis, reg, err = grpcserver.Start(
 		isSeed,
 		grpcAddr,
 		log,
@@ -282,6 +218,7 @@ func main() {
 		},
 		r,
 	)
+
 	if err != nil {
 		log.Errorf("startGRPCServer: %v", err)
 		return
@@ -323,7 +260,7 @@ func main() {
 		if fdef.Enabled {
 			onDown := func() {
 				log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
-				stopGRPCServer(s, lis, log)
+				grpcserver.Stop(s, lis, log)
 				if reporter != nil {
 					reporter.Stop()
 				}
@@ -354,7 +291,7 @@ func main() {
 
 				// Server gRPC nuovo
 				var err error
-				s, lis, reg, err = startGRPCServer(
+				s, lis, reg, err = grpcserver.Start(
 					isSeed, grpcAddr, log, clock, mgr, id,
 					func(max int) []*proto.Stats { return engine.LocalSample(max) },
 					func() *proto.Stats {
@@ -365,9 +302,12 @@ func main() {
 					func(jobID string, cpu, mem, gpu float64, durMs int64) bool {
 						return n.StartJobLoad(jobID, cpu, mem, gpu, time.Duration(durMs)*time.Millisecond)
 					},
-					func(jobID string) bool { return n.CancelJob(jobID) },
+					func(jobID string) bool {
+						return n.CancelJob(jobID)
+					},
 					r,
 				)
+
 				if err != nil {
 					log.Errorf("startGRPCServer (recovery) failed: %v", err)
 				}
