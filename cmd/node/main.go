@@ -1,10 +1,8 @@
 package main
 
 import (
-	"context"
 	crand "crypto/rand"
 	"encoding/hex"
-	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -12,6 +10,7 @@ import (
 	"time"
 
 	"GossipSystemUtilization/internal/antientropy"
+	"GossipSystemUtilization/internal/app"
 	"GossipSystemUtilization/internal/config"
 	"GossipSystemUtilization/internal/faults"
 	"GossipSystemUtilization/internal/grpcserver"
@@ -27,7 +26,6 @@ import (
 	mrand "math/rand"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func newNodeID() string {
@@ -148,7 +146,7 @@ func main() {
 	seedsCSV := getenv("SEEDS", "")
 	bootDelaySim := getenvFloat("BOOT_DELAY_SIM_S", 0)
 
-	// === SWIM manager (periodo 1s SIM; timeout 250ms REAL; k=3; suspicion=6s SIM) ===
+	// === SWIM manager ===
 	swimCfg := swim.Config{
 		PeriodSimS:        1.0,
 		TimeoutRealMs:     250,
@@ -160,7 +158,6 @@ func main() {
 
 	// === Anti-entropy (avail gossip) ===
 	store := antientropy.NewStore(log, clock)
-	// Usa tempo SIM per il timestamp, così TTL funziona correttamente
 	selfSampler := func() *proto.Stats {
 		s := n.CurrentStatsProto()
 		s.TsMs = clock.NowSimMs()
@@ -178,7 +175,7 @@ func main() {
 
 	// === Reporter periodico (riepilogo cluster) ===
 	repCfg := antientropy.ReporterConfig{
-		PeriodSimS: 10.0, // ogni 10s di tempo simulato
+		PeriodSimS: 10.0,
 		TopK:       3,
 	}
 	reporter := antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
@@ -187,16 +184,13 @@ func main() {
 	// Semina lo store con le stats locali per evitare age-out dello self
 	store.UpsertBatch([]*proto.Stats{selfSampler()})
 
-	// === gRPC server (Join solo sui seed; Ping/PingReq/ExchangeAvail su tutti) ===
-
-	// (variabili per gestione crash/recovery)
+	// === gRPC server (Join sui seed; Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel su tutti) ===
 	var (
 		s   *grpc.Server
 		lis net.Listener
 		reg *seed.Registry
 	)
 
-	// === gRPC server (Join sui seed; Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel su tutti) ===
 	s, lis, reg, err = grpcserver.Start(
 		isSeed,
 		grpcAddr,
@@ -218,21 +212,18 @@ func main() {
 		},
 		r,
 	)
-
 	if err != nil {
 		log.Errorf("startGRPCServer: %v", err)
 		return
 	}
 
-	// Se sei seed e il workload è abilitato, avvia il coordinator come già facevi
+	// === Coordinator (solo seed) — usa l'implementazione in app/seed_coordinator.go ===
 	if isSeed && cfg.Workload.Enabled {
-		startSeedCoordinator(log, clock, r, cfg, reg, id)
+		app.StartSeedCoordinator(log, clock, r, cfg, reg, id)
 	}
 
 	// === Crash & Recovery (simulazione fault) ===
-	// Legge i parametri dai "buckets" in cfg.Faults (classi/pesi/frequenze/durate) e inizializza la fault-sim.
 	{
-		// helper per *bool → bool con default
 		boolv := func(p *bool, def bool) bool {
 			if p != nil {
 				return *p
@@ -240,7 +231,6 @@ func main() {
 			return def
 		}
 
-		// Adattatore per la firma di faults.InitSimWithProfile (struct anonimo compatibile)
 		fdef := struct {
 			Enabled               bool
 			PrintTransitions      bool
@@ -271,25 +261,21 @@ func main() {
 					mgr.Stop()
 				}
 			}
-
 			onUp := func() {
 				log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
-				// Ricrea SWIM manager con i parametri che usi all'avvio
+
 				swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
 				mgr = swim.NewManager(id, grpcAddr, log, clock, r, swimCfg)
 				mgr.Start()
 
-				// Ricrea Anti-Entropy Engine (riusa store; selfSampler è già definito)
 				aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
 				engine = antientropy.NewEngine(log, clock, r, store, mgr, selfSampler, aeCfg)
 				engine.Start()
 
-				// Reporter (snapshot periodiche)
 				repCfg := antientropy.ReporterConfig{PeriodSimS: 10.0, TopK: 3}
 				reporter = antientropy.NewReporter(log, clock, store, selfSampler, repCfg)
 				reporter.Start()
 
-				// Server gRPC nuovo
 				var err error
 				s, lis, reg, err = grpcserver.Start(
 					isSeed, grpcAddr, log, clock, mgr, id,
@@ -307,12 +293,10 @@ func main() {
 					},
 					r,
 				)
-
 				if err != nil {
 					log.Errorf("startGRPCServer (recovery) failed: %v", err)
 				}
 
-				// Riprova il JOIN se non-seed
 				if !isSeed && seedsCSV != "" {
 					jc := seed.NewJoinClient(log, clock)
 					pcts := n.PublishedPercentages()
@@ -333,7 +317,6 @@ func main() {
 				}
 			}
 
-			// Inizializza e avvia la fault-sim basata sui buckets del config
 			_, fsim := faults.InitSimWithProfile(
 				log,
 				clock,
@@ -372,14 +355,11 @@ func main() {
 			log.Warnf("JOIN non riuscito: %v (senza view iniziale)")
 		} else {
 			log.Infof("JOIN riuscito via %s — peers iniziali=%d:", seedAddr, len(rep.Peers))
-			// Inserisci il seed nella membership (ID fittizio se non lo conosci)
 			mgr.AddPeer("seed@"+seedAddr, seedAddr)
-			// Inserisci i peer ricevuti
 			for _, p := range rep.Peers {
 				mgr.AddPeer(p.NodeId, p.Addr)
 				log.Infof("  peer: node_id=%s addr=%s seed=%v", p.NodeId, p.Addr, p.IsSeed)
 			}
-			// Semina lo store con lo snapshot ricevuto
 			if len(rep.StatsSnapshot) > 0 {
 				store.UpsertBatch(rep.StatsSnapshot)
 			}
@@ -389,198 +369,4 @@ func main() {
 	}
 
 	select {}
-}
-
-// --- Scheduler seed-only: generazione job + Probe/Commit ---
-
-type schedJob struct {
-	id       string
-	cpu, mem float64
-	gpu      float64
-	duration time.Duration
-}
-
-func startSeedCoordinator(
-	log *logx.Logger,
-	clock *simclock.Clock,
-	r *mrand.Rand,
-	cfg *config.Config,
-	reg *seed.Registry,
-	selfID string,
-) {
-	go func() {
-		// opzionale: un piccolo delay iniziale per dare tempo all'anti-entropy
-		clock.SleepSim(2 * time.Second)
-
-		for {
-			// 1) Attendi il prossimo job (inter-arrivo esponenziale in tempo SIM)
-			mean := cfg.Workload.MeanInterarrivalSimS
-			if mean <= 0 {
-				mean = 10 // fallback robusto
-			}
-			waitS := mean * r.ExpFloat64() // Exp(lambda=1) → mean scaling
-			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
-
-			// 2) Disegna un job dalle distribuzioni del config
-			job := drawJob(r, cfg)
-
-			// 3) Scegli i candidati dal registry del seed (escludendo me stesso)
-			//    campioniamo un po' di peer e poi da quelli prendiamo k per la Probe
-			k := cfg.Scheduler.ProbeFanout
-			if k <= 0 {
-				k = 3
-			}
-			candidates := 2 * k
-			peers := []*proto.PeerInfo(nil)
-			if reg != nil {
-				peers = reg.SamplePeers(selfID, candidates)
-			}
-			if len(peers) == 0 {
-				log.Warnf("COORD: nessun peer disponibile per job=%s; ritento più tardi", job.id)
-				continue
-			}
-			peers = samplePeers(peers, k, r)
-
-			// 4) Probe dei candidati e scelta del migliore
-			bestAddr := ""
-			bestID := ""
-			bestScore := -1.0
-			for _, p := range peers {
-				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs)
-				if ok {
-					if score > bestScore {
-						bestScore = score
-						bestAddr = p.Addr
-						bestID = p.NodeId
-					}
-				} else {
-					log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
-				}
-			}
-			if bestAddr == "" {
-				log.Infof("COORD: nessun peer ha accettato il job=%s", job.id)
-				continue
-			}
-
-			// 5) Commit sul vincitore
-			if commitJob(clock, bestAddr, job, cfg.Scheduler.ProbeTimeoutRealMs) {
-				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
-					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
-			} else {
-				log.Warnf("COORD COMMIT ✖ target=%s job=%s", bestID, job.id)
-			}
-		}
-	}()
-}
-
-func drawJob(r *mrand.Rand, cfg *config.Config) schedJob {
-	id := fmt.Sprintf("job-%06x", r.Uint32())
-
-	// helper uniformi
-	unif := func(min, max float64) float64 {
-		if max <= min {
-			return min
-		}
-		return min + r.Float64()*(max-min)
-	}
-
-	// percentuali
-	cpu := unif(cfg.Workload.JobCPU.MinPct, cfg.Workload.JobCPU.MaxPct)
-	mem := unif(cfg.Workload.JobMEM.MinPct, cfg.Workload.JobMEM.MaxPct)
-
-	// GPU: se range > 0 la usiamo, altrimenti restiamo a 0 (anche se il target potrà rifiutare se non ha GPU)
-	gpu := 0.0
-	if cfg.Workload.JobGPU.MaxPct > 0 {
-		gpu = unif(cfg.Workload.JobGPU.MinPct, cfg.Workload.JobGPU.MaxPct)
-	}
-
-	// durata (tempo SIM)
-	dmin := cfg.Workload.JobDurationSimS.MinS
-	dmax := cfg.Workload.JobDurationSimS.MaxS
-	if dmax <= dmin {
-		dmax = dmin
-	}
-	dS := dmin + r.Float64()*(dmax-dmin)
-	dur := time.Duration(dS * float64(time.Second))
-
-	return schedJob{
-		id:       id,
-		cpu:      cpu,
-		mem:      mem,
-		gpu:      gpu,
-		duration: dur,
-	}
-}
-
-func samplePeers(in []*proto.PeerInfo, k int, r *mrand.Rand) []*proto.PeerInfo {
-	if k <= 0 || k >= len(in) {
-		return in
-	}
-	out := make([]*proto.PeerInfo, 0, k)
-	seen := make(map[int]struct{})
-	for len(out) < k && len(out) < len(in) {
-		i := r.Intn(len(in))
-		if _, ok := seen[i]; ok {
-			continue
-		}
-		seen[i] = struct{}{}
-		out = append(out, in[i])
-	}
-	return out
-}
-
-func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, timeoutMs int) (accept bool, score float64, reason string) {
-	dialCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel()
-
-	conn, err := grpc.DialContext(dialCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		return false, 0, "dial_error"
-	}
-	defer conn.Close()
-
-	cli := proto.NewGossipClient(conn)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel2()
-
-	js := &proto.JobSpec{
-		CpuPct:     job.cpu,
-		MemPct:     job.mem,
-		GpuPct:     job.gpu,
-		DurationMs: int64(job.duration / time.Millisecond),
-	}
-	rep, err := cli.Probe(ctx2, &proto.ProbeRequest{
-		//RequesterId: requesterID,
-		Job: js,
-		//TsMs:        clock.NowSim().UnixMilli(),
-	})
-	if err != nil {
-		return false, 0, "rpc_error"
-	}
-	return rep.WillAccept, rep.Score, rep.Reason
-}
-
-func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int) bool {
-	dialCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel()
-
-	conn, err := grpc.DialContext(dialCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-	if err != nil {
-		return false
-	}
-	defer conn.Close()
-
-	cli := proto.NewGossipClient(conn)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel2()
-
-	_, err = cli.Commit(ctx2, &proto.CommitRequest{
-		JobId:      job.id,
-		CpuPct:     job.cpu,
-		MemPct:     job.mem,
-		GpuPct:     job.gpu,
-		DurationMs: int64(job.duration / time.Millisecond),
-		//TsMs:       clock.NowSim().UnixMilli(),
-	})
-	return err == nil
 }
