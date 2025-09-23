@@ -171,8 +171,8 @@ func (rt *Runtime) RecoverAll() {
 	rt.Reporter = antientropy.NewReporter(rt.Log, rt.Clock, rt.Store, rt.selfStats, repCfg)
 	rt.Reporter.Start()
 
-	// --- MODIFICA 3: RIMUOVI ANCHE QUI LA CREAZIONE DELLA CODA ---
-	// La coda originale persiste durante il recovery.
+	// --- CORREZIONE: RIMUOVIAMO LA LOGICA CONDIZIONALE PER LA PBQueue ---
+	// La PBQueue è gestita esternamente e persiste tra i recovery. Non va toccata.
 
 	// gRPC
 	var err error
