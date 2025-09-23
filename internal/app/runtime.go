@@ -12,6 +12,7 @@ import (
 	"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/node"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
 	"GossipSystemUtilization/internal/simclock"
 	"GossipSystemUtilization/internal/swim"
@@ -31,20 +32,23 @@ type Runtime struct {
 	Rng   *mrand.Rand
 
 	// building blocks
-	Node  *node.Node
-	Store *antientropy.Store
+	Node    *node.Node
+	Store   *antientropy.Store
+	PBQueue *piggyback.Queue // Ora è un building block
 
 	// live components (managed)
-	Mgr       *swim.Manager
-	Engine    *antientropy.Engine
-	Reporter  *antientropy.Reporter
-	GRPC      *grpc.Server
-	Listener  net.Listener
-	Registry  *seed.Registry
+	Mgr      *swim.Manager
+	Engine   *antientropy.Engine
+	Reporter *antientropy.Reporter
+	GRPC     *grpc.Server
+	Listener net.Listener
+	Registry *seed.Registry
+
 	selfStats func() *proto.Stats
 }
 
 // factory
+// --- MODIFICA 1: Aggiungi pbq come parametro ---
 func NewRuntime(
 	id, grpcAddr string,
 	isSeed bool,
@@ -54,6 +58,7 @@ func NewRuntime(
 	r *mrand.Rand,
 	n *node.Node,
 	store *antientropy.Store,
+	pbq *piggyback.Queue, // <-- NUOVO PARAMETRO
 ) *Runtime {
 	rt := &Runtime{
 		ID:       id,
@@ -65,6 +70,7 @@ func NewRuntime(
 		Rng:      r,
 		Node:     n,
 		Store:    store,
+		PBQueue:  pbq, // <-- ASSEGNA LA CODA PASSATA DALL'ESTERNO
 	}
 	rt.selfStats = func() *proto.Stats {
 		s := rt.Node.CurrentStatsProto()
@@ -93,7 +99,7 @@ func (rt *Runtime) StartAll() error {
 		SampleSize: 8,
 		TtlSimS:    12.0,
 	}
-	rt.Engine = antientropy.NewEngine(rt.Log, rt.Clock, rt.Rng, rt.Store, rt.Mgr, rt.selfStats, aeCfg)
+	rt.Engine = antientropy.NewEngine(rt.Log, rt.Clock, rt.Rng, rt.Store, rt.Mgr, rt.PBQueue, rt.selfStats, aeCfg)
 	rt.Engine.Start()
 
 	// Reporter
@@ -104,6 +110,9 @@ func (rt *Runtime) StartAll() error {
 	// Semina lo store con le stats locali
 	rt.Store.UpsertBatch([]*proto.Stats{rt.selfStats()})
 
+	// --- MODIFICA 2: RIMUOVI LA CREAZIONE DELLA CODA DA QUI ---
+	// La coda viene ora creata in main.go e passata al Runtime.
+
 	// gRPC server
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(
@@ -113,7 +122,7 @@ func (rt *Runtime) StartAll() error {
 		rt.Clock,
 		rt.Mgr,
 		rt.ID,
-		func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) },
+		seed.Sampler(func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) }),
 		func() *proto.Stats {
 			s := rt.Node.CurrentStatsProto()
 			s.TsMs = rt.Clock.NowSim().UnixMilli()
@@ -126,6 +135,7 @@ func (rt *Runtime) StartAll() error {
 			return rt.Node.CancelJob(jobID)
 		},
 		rt.Rng,
+		rt.PBQueue,
 	)
 	return err
 }
@@ -153,7 +163,7 @@ func (rt *Runtime) RecoverAll() {
 
 	// AE
 	aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
-	rt.Engine = antientropy.NewEngine(rt.Log, rt.Clock, rt.Rng, rt.Store, rt.Mgr, rt.selfStats, aeCfg)
+	rt.Engine = antientropy.NewEngine(rt.Log, rt.Clock, rt.Rng, rt.Store, rt.Mgr, rt.PBQueue, rt.selfStats, aeCfg)
 	rt.Engine.Start()
 
 	// Reporter
@@ -161,11 +171,14 @@ func (rt *Runtime) RecoverAll() {
 	rt.Reporter = antientropy.NewReporter(rt.Log, rt.Clock, rt.Store, rt.selfStats, repCfg)
 	rt.Reporter.Start()
 
+	// --- MODIFICA 3: RIMUOVI ANCHE QUI LA CREAZIONE DELLA CODA ---
+	// La coda originale persiste durante il recovery.
+
 	// gRPC
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(
 		rt.IsSeed, rt.GRPCAddr, rt.Log, rt.Clock, rt.Mgr, rt.ID,
-		func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) },
+		seed.Sampler(func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) }),
 		func() *proto.Stats {
 			s := rt.Node.CurrentStatsProto()
 			s.TsMs = rt.Clock.NowSim().UnixMilli()
@@ -178,6 +191,7 @@ func (rt *Runtime) RecoverAll() {
 			return rt.Node.CancelJob(jobID)
 		},
 		rt.Rng,
+		rt.PBQueue,
 	)
 	if err != nil {
 		rt.Log.Errorf("startGRPCServer (recovery) failed: %v", err)
@@ -187,7 +201,7 @@ func (rt *Runtime) RecoverAll() {
 	rt.tryJoinPostRecovery()
 }
 
-// TryJoinIfNeeded esegue il join iniziale (per peer non-seed) dopo l'eventuale boot delay.
+// ... il resto del file (TryJoinIfNeeded, etc.) resta invariato ...
 func (rt *Runtime) TryJoinIfNeeded() {
 	if rt.IsSeed || rt.SeedsCSV == "" {
 		return
@@ -195,7 +209,6 @@ func (rt *Runtime) TryJoinIfNeeded() {
 	rt.doJoin("JOIN")
 }
 
-// tryJoinPostRecovery viene usato in RecoverAll().
 func (rt *Runtime) tryJoinPostRecovery() {
 	if rt.IsSeed {
 		if rt.Registry != nil {
@@ -231,14 +244,11 @@ func (rt *Runtime) doJoin(prefix string) {
 	}
 	rt.Log.Infof("%s via %s — peers=%d", prefix, seedAddr, len(rep.Peers))
 
-	// Inserisci il seed nella membership
 	rt.Mgr.AddPeer("seed@"+seedAddr, seedAddr)
-	// Inserisci i peer ricevuti
 	for _, p := range rep.Peers {
 		rt.Mgr.AddPeer(p.NodeId, p.Addr)
 		rt.Log.Infof("  peer: node_id=%s addr=%s seed=%v", p.NodeId, p.Addr, p.IsSeed)
 	}
-	// Semina store con snapshot
 	if len(rep.StatsSnapshot) > 0 {
 		rt.Store.UpsertBatch(rep.StatsSnapshot)
 	}

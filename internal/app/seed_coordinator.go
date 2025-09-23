@@ -12,7 +12,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"GossipSystemUtilization/internal/config"
+	//"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/logx"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
 	"GossipSystemUtilization/internal/simclock"
 
@@ -35,6 +37,7 @@ func StartSeedCoordinator(
 	cfg *config.Config,
 	reg *seed.Registry,
 	selfID string,
+	pbq *piggyback.Queue,
 ) {
 	go func() {
 		// opzionale: un piccolo delay iniziale per dare tempo all'anti-entropy
@@ -74,7 +77,7 @@ func StartSeedCoordinator(
 			bestID := ""
 			bestScore := -1.0
 			for _, p := range peers {
-				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs)
+				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq)
 				if ok {
 					if score > bestScore {
 						bestScore = score
@@ -91,7 +94,7 @@ func StartSeedCoordinator(
 			}
 
 			// 5) Commit sul vincitore
-			if commitJob(clock, bestAddr, job, cfg.Scheduler.ProbeTimeoutRealMs) {
+			if commitJob(clock, bestAddr, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq) {
 				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
 			} else {
@@ -157,19 +160,24 @@ func samplePeers(in []*proto.PeerInfo, k int, r *mrand.Rand) []*proto.PeerInfo {
 	return out
 }
 
-func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, timeoutMs int) (accept bool, score float64, reason string) {
-	dialCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, timeoutMs int, pbq *piggyback.Queue) (accept bool, score float64, reason string) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	// --- CORREZIONE: Utilizziamo un dialer gRPC standard con l'interceptor,
+	// invece della funzione custom che creava problemi. ---
+	conn, err := grpc.DialContext(ctx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)), // Aggiungiamo l'interceptor qui
+	)
+
 	if err != nil {
 		return false, 0, "dial_error"
 	}
 	defer conn.Close()
 
 	cli := proto.NewGossipClient(conn)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel2()
 
 	js := &proto.JobSpec{
 		CpuPct:     job.cpu,
@@ -177,10 +185,8 @@ func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, ti
 		GpuPct:     job.gpu,
 		DurationMs: int64(job.duration / time.Millisecond),
 	}
-	rep, err := cli.Probe(ctx2, &proto.ProbeRequest{
-		//RequesterId: requesterID,
+	rep, err := cli.Probe(ctx, &proto.ProbeRequest{
 		Job: js,
-		//TsMs:        clock.NowSim().UnixMilli(),
 	})
 	if err != nil {
 		return false, 0, "rpc_error"
@@ -188,27 +194,29 @@ func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, ti
 	return rep.WillAccept, rep.Score, rep.Reason
 }
 
-func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int) bool {
-	dialCtx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
+func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, pbq *piggyback.Queue) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	// --- CORREZIONE: Stessa modifica anche qui ---
+	conn, err := grpc.DialContext(ctx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)), // Aggiungiamo l'interceptor qui
+	)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
 
 	cli := proto.NewGossipClient(conn)
-	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
-	defer cancel2()
 
-	_, err = cli.Commit(ctx2, &proto.CommitRequest{
+	_, err = cli.Commit(ctx, &proto.CommitRequest{
 		JobId:      job.id,
 		CpuPct:     job.cpu,
 		MemPct:     job.mem,
 		GpuPct:     job.gpu,
 		DurationMs: int64(job.duration / time.Millisecond),
-		//TsMs:       clock.NowSim().UnixMilli(),
 	})
 	return err == nil
 }

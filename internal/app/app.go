@@ -1,6 +1,9 @@
+// internal/app/app.go
+
 package app
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -11,6 +14,7 @@ import (
 	"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/node"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
 	"GossipSystemUtilization/internal/simclock"
 	"GossipSystemUtilization/internal/swim"
@@ -38,6 +42,9 @@ type App struct {
 	grpcSrv *grpc.Server
 	reg     *seed.Registry
 
+	// piggyback queue locale
+	PBQ *piggyback.Queue
+
 	Cfg *config.Config
 }
 
@@ -64,13 +71,18 @@ func (a *App) Init() error {
 		return s
 	}
 
+	// --- MODIFICA 1: INIZIALIZZARE PBQ PRIMA DI AEEng ---
+	// Piggyback queue (TTL ~110s, cap 200)
+	a.PBQ = piggyback.NewQueue(a.Log, a.Clock, 200, 110*time.Second)
+
 	aeCfg := antientropy.Config{
 		PeriodSimS: 3.0,
 		Fanout:     2,
 		SampleSize: 8,
 		TtlSimS:    12.0,
 	}
-	a.AEEng = antientropy.NewEngine(a.Log, a.Clock, a.Rng, a.AEStore, a.SwimMgr, selfSampler, aeCfg)
+	// --- MODIFICA 2: PASSARE a.PBQ ALLA FUNZIONE NewEngine ---
+	a.AEEng = antientropy.NewEngine(a.Log, a.Clock, a.Rng, a.AEStore, a.SwimMgr, a.PBQ, selfSampler, aeCfg)
 	a.AEEng.Start()
 
 	// Reporter
@@ -81,8 +93,22 @@ func (a *App) Init() error {
 	// Semina lo store con le stats locali
 	a.AEStore.UpsertBatch([]*proto.Stats{selfSampler()})
 
+	// Aggiorna periodicamente la piggyback queue con lo "self advert" dalle Stats
+	go func() {
+		for {
+			s := a.Node.CurrentStatsProto()
+			s.TsMs = a.Clock.NowSimMs()
+			a.PBQ.UpsertSelfFromStats(s)
+			a.Clock.SleepSim(2 * time.Second)
+		}
+	}()
+
 	// gRPC server
 	var err error
+	statsSampler := func(max int) []*proto.Stats {
+		return a.AEEng.LocalSample(max)
+	}
+
 	_, _, a.reg, err = grpcserver.Start(
 		a.IsSeed,
 		a.Addr,
@@ -90,7 +116,7 @@ func (a *App) Init() error {
 		a.Clock,
 		a.SwimMgr,
 		a.ID,
-		func(max int) []*proto.Stats { return a.AEEng.LocalSample(max) },
+		statsSampler,
 		func() *proto.Stats {
 			s := a.Node.CurrentStatsProto()
 			s.TsMs = a.Clock.NowSimMs()
@@ -103,17 +129,11 @@ func (a *App) Init() error {
 			return a.Node.CancelJob(jobID)
 		},
 		a.Rng,
+		a.PBQ,
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("start gRPC server: %w", err)
 	}
 
-	/*
-		// Coordinator (solo seed)
-		if a.IsSeed && a.Cfg != nil && a.Cfg.Workload.Enabled {
-			StartSeedCoordinator(a.Log, a.Clock, a.Rng, a.Cfg, a.reg, a.ID)
-		}
-	*/
 	return nil
-
 }

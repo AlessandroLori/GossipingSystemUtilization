@@ -15,6 +15,7 @@ import (
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/model"
 	"GossipSystemUtilization/internal/node"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
 
 	mrand "math/rand"
@@ -133,16 +134,31 @@ func main() {
 	seedsCSV := getenv("SEEDS", "")
 	bootDelaySim := getenvFloat("BOOT_DELAY_SIM_S", 0)
 
+	// === Piggyback queue (micro-annunci) + self-advert periodico ===
+	pbq := piggyback.NewQueue(log, clock, 200, 110*time.Second)
+	go func() {
+		for {
+			s := n.CurrentStatsProto()
+			s.TsMs = clock.NowSimMs()
+			pbq.UpsertSelfFromStats(s)
+			clock.SleepSim(2 * time.Second)
+		}
+	}()
+
 	// === Runtime (SWIM + AE + Reporter + gRPC) ===
-	rt := app.NewRuntime(id, grpcAddr, isSeed, seedsCSV, log, clock, r, n, store)
+	// --- MODIFICA 4: Passa la 'pbq' appena creata al costruttore del Runtime ---
+	rt := app.NewRuntime(id, grpcAddr, isSeed, seedsCSV, log, clock, r, n, store, pbq)
 	if err := rt.StartAll(); err != nil {
 		log.Errorf("start runtime: %v", err)
 		return
 	}
 
 	// === Coordinator (solo seed) — già in app/seed_coordinator.go ===
+	// NOTE: al momento StartSeedCoordinator non accetta pbq.
+	// Quando aggiornerai il coordinator per allegare i piggyback sulle RPC in uscita,
+	// passeremo pbq anche lì.
 	if isSeed && cfg.Workload.Enabled {
-		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id)
+		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id, rt.PBQueue)
 	}
 
 	// === Fault-sim (Crash & Recovery) — hook interni al package app ===

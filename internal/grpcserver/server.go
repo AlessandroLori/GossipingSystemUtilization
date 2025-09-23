@@ -5,17 +5,19 @@ import (
 	"math/rand"
 	"net"
 
+	// "time" // <-- non più necessario
+
 	"GossipSystemUtilization/internal/logx"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
 	"GossipSystemUtilization/internal/simclock"
 	"GossipSystemUtilization/internal/swim"
-	"GossipSystemUtilization/proto"
+	proto "GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
 )
 
 // Start avvia il server gRPC e (se seed) crea il Registry locale.
-// È un estratto 1:1 di startGRPCServer dal main, così non cambi le call-site.
 func Start(
 	isSeed bool,
 	grpcAddr string,
@@ -28,12 +30,18 @@ func Start(
 	applyCommitFn func(string, float64, float64, float64, int64) bool,
 	cancelFn func(string) bool,
 	r *rand.Rand,
+	pbq *piggyback.Queue,
 ) (s *grpc.Server, lis net.Listener, reg *seed.Registry, err error) {
+
 	lis, err = net.Listen("tcp", grpcAddr)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("listen %s: %w", grpcAddr, err)
 	}
-	s = grpc.NewServer()
+	s = grpc.NewServer(
+		grpc.ChainUnaryInterceptor(
+			piggyback.UnaryServerInterceptor(pbq),
+		),
+	)
 
 	if isSeed {
 		reg = seed.NewRegistry(r)
@@ -52,21 +60,25 @@ func Start(
 		applyCommitFn,
 		cancelFn,
 	)
-
 	proto.RegisterGossipServer(s, srv)
 
+	// Avvia serve
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			log.Errorf("gRPC Serve: %v", err)
 		}
 	}()
 
+	// --- BLOCCO DEL TICKER RIMOSSO ---
+	// La logica di auto-aggiornamento periodico è già gestita centralmente
+	// in cmd/node/main.go usando il simclock, che è il modo corretto.
+	// Rimuoviamo questa versione duplicata e basata sul tempo reale per evitare conflitti.
+
 	if isSeed {
 		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
 	} else {
 		log.Infof("Peer non-seed su %s (Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)
 	}
-
 	return s, lis, reg, nil
 }
 

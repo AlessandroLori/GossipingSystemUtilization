@@ -1,3 +1,4 @@
+// internal/antientropy/engine.go
 package antientropy
 
 import (
@@ -5,7 +6,9 @@ import (
 	"math/rand"
 	"time"
 
+	// "GossipSystemUtilization/internal/grpcserver" // Rimuovi questo import
 	"GossipSystemUtilization/internal/logx"
+	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
 	"GossipSystemUtilization/internal/swim"
 	proto "GossipSystemUtilization/proto"
@@ -14,6 +17,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+// ... (Config, e la struct Engine rimangono uguali) ...
 type Config struct {
 	PeriodSimS float64 // intervallo gossip (SIM)
 	Fanout     int     // quanti peer contattare per round
@@ -28,6 +32,7 @@ type Engine struct {
 
 	store *Store
 	swim  *swim.Manager
+	pbq   *piggyback.Queue
 
 	selfSampler func() *proto.Stats
 
@@ -40,7 +45,8 @@ type Engine struct {
 }
 
 func NewEngine(log *logx.Logger, clk *simclock.Clock, rnd *rand.Rand,
-	store *Store, swimMgr *swim.Manager, selfSampler func() *proto.Stats, cfg Config) *Engine {
+	store *Store, swimMgr *swim.Manager, pbq *piggyback.Queue,
+	selfSampler func() *proto.Stats, cfg Config) *Engine {
 
 	if cfg.PeriodSimS <= 0 {
 		cfg.PeriodSimS = 3.0
@@ -61,6 +67,7 @@ func NewEngine(log *logx.Logger, clk *simclock.Clock, rnd *rand.Rand,
 		rnd:         rnd,
 		store:       store,
 		swim:        swimMgr,
+		pbq:         pbq,
 		selfSampler: selfSampler,
 		period:      time.Duration(cfg.PeriodSimS * float64(time.Second)),
 		ttlSim:      time.Duration(cfg.TtlSimS * float64(time.Second)),
@@ -68,20 +75,17 @@ func NewEngine(log *logx.Logger, clk *simclock.Clock, rnd *rand.Rand,
 		sampleSize:  cfg.SampleSize,
 		stopCh:      make(chan struct{}),
 	}
-
 }
 
+// ... (Start, Stop, LocalSample, loopExchange rimangono uguali) ...
 func (e *Engine) Start() {
 	go e.loopExchange()
 	go e.loopAging()
 }
 func (e *Engine) Stop() { close(e.stopCh) }
-
-// Fornito al server gRPC per rispondere all'ExchangeAvail (push-pull)
 func (e *Engine) LocalSample(max int) []*proto.Stats {
 	return e.store.SnapshotSample(max, e.selfSampler())
 }
-
 func (e *Engine) loopExchange() {
 	for {
 		select {
@@ -90,24 +94,16 @@ func (e *Engine) loopExchange() {
 		default:
 		}
 		e.clk.SleepSim(e.period)
-
-		// Evita che lo "self" scada: refresha prima di ogni giro
-		//if self := e.selfSampler(); self != nil {
-		//	e.store.UpsertBatch([]*proto.Stats{self})
-		//}
-
 		peers := e.swim.AlivePeers()
 		if len(peers) == 0 {
 			continue
 		}
 		e.rnd.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
-
 		fan := e.fanout
 		if fan <= 0 || fan > len(peers) {
 			fan = len(peers)
 		}
 		targets := peers[:fan]
-
 		req := &proto.AvailBatch{
 			Stats: e.store.SnapshotSample(e.sampleSize, e.selfSampler()),
 		}
@@ -121,7 +117,11 @@ func (e *Engine) exchangeWith(addr string, req *proto.AvailBatch) {
 	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	conn, err := grpc.DialContext(ctx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(e.pbq)), // Aggiungiamo l'interceptor qui
+	)
 	if err != nil {
 		return
 	}
@@ -140,6 +140,7 @@ func (e *Engine) exchangeWith(addr string, req *proto.AvailBatch) {
 	}
 }
 
+// ... (loopAging rimane uguale) ...
 func (e *Engine) loopAging() {
 	period := e.period
 	if period < 500*time.Millisecond {
