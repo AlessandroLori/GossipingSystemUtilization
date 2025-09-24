@@ -77,6 +77,30 @@ func weightedPick(m map[string]float64, r *mrand.Rand) string {
 	return ""
 }
 
+func powerClassName(pc model.PowerClass) string {
+	switch pc {
+	case model.PowerWeak:
+		return "weak"
+	case model.PowerStrong:
+		return "powerful"
+	default:
+		return "medium"
+	}
+}
+
+func className(i int) string {
+	switch i {
+	case 1:
+		return "CPU_ONLY"
+	case 2:
+		return "MEM_HEAVY"
+	case 3:
+		return "GPU_HEAVY"
+	default:
+		return "GENERAL"
+	}
+}
+
 func main() {
 	// === Config & clock ===
 	cfgPath := getenv("CONFIG_PATH", "config.json")
@@ -128,6 +152,61 @@ func main() {
 	n.Init(pc, caps, bgWeak, bgMed, bgStr)
 	store := antientropy.NewStore(log, clock)
 
+	// === LOG: profilo nodo (suitability) + mix generazione + soglie heavy ===
+	// Stimiamo la suitability normalizzando le capacità del power class scelto.
+	var capSel model.Capacity
+	var gpuProb float64
+	switch pc {
+	case model.PowerWeak:
+		capSel = caps.WeakCap
+		gpuProb = caps.GPUProbWeak
+	case model.PowerStrong:
+		capSel = caps.StrongCap
+		gpuProb = caps.GPUProbStrong
+	default:
+		capSel = caps.MediumCap
+		gpuProb = caps.GPUProbMedium
+	}
+	// Heuristica presenza GPU: dallo snapshot delle stats (GpuPct<0 → no GPU)
+	snap := n.CurrentStatsProto()
+	hasGPU := snap.GpuPct >= 0
+	tot := capSel.CPU + capSel.MEM
+	if hasGPU {
+		tot += capSel.GPU
+	}
+	var pCPU, pMEM, pGPU float64
+	if tot > 0 {
+		pCPU = capSel.CPU / tot
+		pMEM = capSel.MEM / tot
+		if hasGPU {
+			pGPU = capSel.GPU / tot
+		} else {
+			pGPU = 0
+		}
+	}
+	log.Infof("NODE PROFILE → power=%s hasGPU=%v gpu_prob=%.2f cap[CPU=%.1f MEM=%.1f GPU=%.1f] suitability≈{CPU=%.2f MEM=%.2f GPU=%.2f}",
+		powerClassName(pc), hasGPU, gpuProb, capSel.CPU, capSel.MEM, capSel.GPU, pCPU, pMEM, pGPU)
+
+	// Mix generazione job + soglie heavy effettive (valide per tutti i nodi)
+	cTh, mTh, gTh := cfg.EffectiveThresholds()
+	if cfg.Workload.UseBuckets() {
+		cb, mb, gb, db := cfg.Workload.CPUBuckets, cfg.Workload.MEMBuckets, cfg.Workload.GPUBuckets, cfg.Workload.DurationBuckets
+		log.Infof("JOB GEN MIX (bucket/prob): CPU[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f] MEM[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f] GPU[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f] DUR[s=%.0fs,m=%.0fs,l=%.0fs | p=%.2f/%.2f/%.2f]",
+			cb.SmallPct, cb.MediumPct, cb.LargePct, cb.ProbSmall, cb.ProbMedium, cb.ProbLarge,
+			mb.SmallPct, mb.MediumPct, mb.LargePct, mb.ProbSmall, mb.ProbMedium, mb.ProbLarge,
+			gb.SmallPct, gb.MediumPct, gb.LargePct, gb.ProbSmall, gb.ProbMedium, gb.ProbLarge,
+			db.SmallSimS, db.MediumSimS, db.LargeSimS, db.ProbSmall, db.ProbMedium, db.ProbLarge,
+		)
+	} else {
+		log.Infof("JOB GEN MIX (legacy ranges): CPU[%.0f..%.0f] MEM[%.0f..%.0f] GPU[%.0f..%.0f] DUR[%.0fs..%.0fs]",
+			cfg.Workload.JobCPU.MinPct, cfg.Workload.JobCPU.MaxPct,
+			cfg.Workload.JobMEM.MinPct, cfg.Workload.JobMEM.MaxPct,
+			cfg.Workload.JobGPU.MinPct, cfg.Workload.JobGPU.MaxPct,
+			cfg.Workload.JobDurationSimS.MinS, cfg.Workload.JobDurationSimS.MaxS,
+		)
+	}
+	log.Infof("AFFINITY HEAVY THRESHOLDS → CPU≥%.0f%% MEM≥%.0f%% GPU≥%.0f%%", cTh, mTh, gTh)
+
 	// === Parametri rete via ENV ===
 	grpcAddr := getenv("GRPC_ADDR", "127.0.0.1:9001")
 	isSeed := getenvBool("IS_SEED")
@@ -146,22 +225,75 @@ func main() {
 	}()
 
 	// === Runtime (SWIM + AE + Reporter + gRPC) ===
-	// --- MODIFICA 4: Passa la 'pbq' appena creata al costruttore del Runtime ---
 	rt := app.NewRuntime(id, grpcAddr, isSeed, seedsCSV, log, clock, r, n, store, pbq)
 	if err := rt.StartAll(); err != nil {
 		log.Errorf("start runtime: %v", err)
 		return
 	}
 
-	// === Coordinator (solo seed) — già in app/seed_coordinator.go ===
-	// NOTE: al momento StartSeedCoordinator non accetta pbq.
-	// Quando aggiornerai il coordinator per allegare i piggyback sulle RPC in uscita,
-	// passeremo pbq anche lì.
+	// === Coordinator (solo seed): crea la PERSONA e avvialo ===
 	if isSeed && cfg.Workload.Enabled {
-		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id, rt.PBQueue)
+		// 1) Primary class 25% ciascuna
+		u := r.Float64()
+		primary := 0 // GENERAL
+		switch {
+		case u < 0.25:
+			primary = 0 // GENERAL
+		case u < 0.50:
+			primary = 1 // CPU_ONLY
+		case u < 0.75:
+			primary = 2 // MEM_HEAVY
+		default:
+			primary = 3 // GPU_HEAVY
+		}
+
+		// 2) Dominance (quanto pesa la primaria) — override via ENV NODE_PRIMARY_DOMINANCE
+		dominance := getenvFloat("NODE_PRIMARY_DOMINANCE", 0.70)
+		if dominance < 0.50 {
+			dominance = 0.50
+		}
+		if dominance > 0.90 {
+			dominance = 0.90
+		}
+
+		mix := [4]float64{}
+		rest := (1.0 - dominance) / 3.0
+		for i := 0; i < 4; i++ {
+			mix[i] = rest
+		}
+		mix[primary] = dominance
+
+		// 3) Rate (quanto spesso genera) — distribuzione: slow 25%, normal 50%, fast 25%
+		u2 := r.Float64()
+		rateLabel := "normal"
+		rateFactor := 1.00
+		switch {
+		case u2 < 0.25:
+			rateLabel, rateFactor = "slow", 1.50
+		case u2 < 0.75:
+			rateLabel, rateFactor = "normal", 1.00
+		default:
+			rateLabel, rateFactor = "fast", 0.70
+		}
+		meanBase := cfg.Workload.MeanInterarrivalSimS
+		if meanBase <= 0 {
+			meanBase = 10
+		}
+		meanNode := meanBase * rateFactor
+
+		persona := app.NodePersona{
+			Primary:              primary,
+			Dominance:            dominance,
+			Mix:                  mix,
+			RateLabel:            rateLabel,
+			RateFactor:           rateFactor,
+			MeanInterarrivalSimS: meanNode,
+		}
+
+		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id, rt.PBQueue, persona)
 	}
 
-	// === Fault-sim (Crash & Recovery) — hook interni al package app ===
+	// === Fault-sim (Crash & Recovery) ===
 	app.StartFaultRecoveryWithRuntime(
 		log, clock, r,
 		app.FaultProfileInput{

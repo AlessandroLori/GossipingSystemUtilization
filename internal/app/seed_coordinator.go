@@ -10,9 +10,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"GossipSystemUtilization/internal/config"
-	//"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/affinity"
+	"GossipSystemUtilization/internal/config"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
@@ -30,7 +29,198 @@ type schedJob struct {
 	duration time.Duration
 }
 
-// StartSeedCoordinator: versione con Friends & Reputation e decay legato al clock simulato
+// ====== PERSONA PER-NODO ======
+// NOTE override veloci via ENV (opzionali, vedi main.go):
+//
+//	NODE_PRIMARY_DOMINANCE (0.50..0.90) default 0.70
+//	NODE_RATE_DIST (slow|normal|fast|mix) default mix
+type NodePersona struct {
+	Primary              int        // 0=GENERAL, 1=CPU_ONLY, 2=MEM_HEAVY, 3=GPU_HEAVY
+	Dominance            float64    // tipicamente 0.6..0.85
+	Mix                  [4]float64 // prob. con cui si sceglie la classe ad ogni job (somma=1)
+	RateLabel            string     // "slow"|"normal"|"fast"
+	RateFactor           float64    // 1.50 (slow), 1.00 (normal), 0.70 (fast)
+	MeanInterarrivalSimS float64    // mean base (da cfg) moltiplicato per RateFactor
+}
+
+// ====== GENERATORE PER-NODO ======
+
+type nodeJobGenerator struct {
+	r      *mrand.Rand
+	cfg    *config.Config
+	classP [4]float64 // order: 0=GENERAL, 1=CPU_ONLY, 2=MEM_HEAVY, 3=GPU_HEAVY
+	meanS  float64    // mean interarrival (SIM) del nodo
+
+	// soglie "heavy" effettive dal config (aligned ai bucket large)
+	cpuTh, memTh, gpuTh float64
+}
+
+func newNodeJobGeneratorFromPersona(r *mrand.Rand, cfg *config.Config, persona NodePersona) *nodeJobGenerator {
+	if r == nil {
+		r = mrand.New(mrand.NewSource(time.Now().UnixNano()))
+	}
+	cTh, mTh, gTh := cfg.EffectiveThresholds()
+	return &nodeJobGenerator{
+		r:      r,
+		cfg:    cfg,
+		classP: persona.Mix,
+		meanS:  persona.MeanInterarrivalSimS,
+		cpuTh:  cTh, memTh: mTh, gpuTh: gTh,
+	}
+}
+
+// pick classe secondo le probabilità del nodo
+func (g *nodeJobGenerator) pickClass() int {
+	u := g.r.Float64()
+	acc := 0.0
+	for i, p := range g.classP {
+		acc += p
+		if u <= acc {
+			return i // 0=GENERAL 1=CPU_ONLY 2=MEM_HEAVY 3=GPU_HEAVY
+		}
+	}
+	return 0
+}
+
+// sampling valori coerenti con la classe scelta
+func (g *nodeJobGenerator) drawJob() schedJob {
+	id := fmt.Sprintf("job-%06x", g.r.Uint32())
+
+	cls := g.pickClass()
+
+	// Helpers
+	unif := func(min, max float64) float64 {
+		if max <= min {
+			return min
+		}
+		return min + g.r.Float64()*(max-min)
+	}
+	sampleBelow := func(min, max, upper float64) float64 {
+		hi := max
+		if upper < hi {
+			hi = upper
+		}
+		if hi <= min {
+			return min + 0.5*(max-min)
+		}
+		return unif(min, hi)
+	}
+	sampleAtLeast := func(min, max, lower float64) float64 {
+		lo := min
+		if lower > lo {
+			lo = lower
+		}
+		if max <= lo {
+			return max
+		}
+		// bias verso coda alta
+		u := 0.7 + 0.3*g.r.Float64()
+		return lo + u*(max-lo)
+	}
+
+	// leggi intervalli da config (se buckets, usa anchor ±20%)
+	var cpuMin, cpuMax = g.cfg.Workload.JobCPU.MinPct, g.cfg.Workload.JobCPU.MaxPct
+	var memMin, memMax = g.cfg.Workload.JobMEM.MinPct, g.cfg.Workload.JobMEM.MaxPct
+	var gpuMin, gpuMax = g.cfg.Workload.JobGPU.MinPct, g.cfg.Workload.JobGPU.MaxPct
+	if g.cfg.Workload.UseBuckets() {
+		cb, mb, gb := g.cfg.Workload.CPUBuckets, g.cfg.Workload.MEMBuckets, g.cfg.Workload.GPUBuckets
+		expand := func(anchor float64) (float64, float64) {
+			lo := anchor * 0.8
+			hi := anchor * 1.2
+			if lo < 0 {
+				lo = 0
+			}
+			if hi > 100 {
+				hi = 100
+			}
+			if hi <= lo {
+				hi = lo + 1
+			}
+			return lo, hi
+		}
+		cpuMin, cpuMax = expand(weightedAnchor(cls, cb, g))
+		memMin, memMax = expand(weightedAnchor(cls, mb, g))
+		gpuMin, gpuMax = expand(weightedAnchor(cls, gb, g))
+	}
+
+	var cpu, mem, gpu float64
+	switch cls {
+	case 1: // CPU_ONLY
+		cpu = sampleAtLeast(cpuMin, cpuMax, g.cpuTh)
+		mem = sampleBelow(memMin, memMax, g.memTh)
+		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh*0.5)
+	case 2: // MEM_HEAVY
+		mem = sampleAtLeast(memMin, memMax, g.memTh)
+		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
+		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh*0.5)
+	case 3: // GPU_HEAVY
+		gpu = sampleAtLeast(gpuMin, gpuMax, g.gpuTh)
+		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
+		mem = sampleBelow(memMin, memMax, g.memTh)
+	default: // 0: GENERAL
+		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
+		mem = sampleBelow(memMin, memMax, g.memTh)
+		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh)
+	}
+
+	// durata
+	var dur time.Duration
+	if g.cfg.Workload.UseBuckets() && g.cfg.Workload.DurationBuckets != nil {
+		db := g.cfg.Workload.DurationBuckets
+		anchor := pickByProb(g.r,
+			[]float64{db.ProbSmall, db.ProbMedium, db.ProbLarge},
+			[]float64{db.SmallSimS, db.MediumSimS, db.LargeSimS},
+		)
+		lo := anchor * 0.8
+		hi := anchor * 1.2
+		if hi <= lo {
+			hi = lo + 1
+		}
+		sec := lo + g.r.Float64()*(hi-lo)
+		dur = time.Duration(sec * float64(time.Second))
+	} else {
+		dmin := g.cfg.Workload.JobDurationSimS.MinS
+		dmax := g.cfg.Workload.JobDurationSimS.MaxS
+		if dmax <= dmin {
+			dmax = dmin
+		}
+		dS := dmin + g.r.Float64()*(dmax-dmin)
+		dur = time.Duration(dS * float64(time.Second))
+	}
+
+	return schedJob{id: id, cpu: cpu, mem: mem, gpu: gpu, duration: dur}
+}
+
+func weightedAnchor(cls int, b *config.ProbBucketsPct, g *nodeJobGenerator) float64 {
+	if b == nil {
+		return 10
+	}
+	anchors := []float64{b.SmallPct, b.MediumPct, b.LargePct}
+	probs := []float64{b.ProbSmall, b.ProbMedium, b.ProbLarge}
+	return pickByProb(g.r, probs, anchors)
+}
+
+func pickByProb(r *mrand.Rand, probs []float64, values []float64) float64 {
+	if len(probs) != len(values) || len(probs) == 0 {
+		return 0
+	}
+	sum := 0.0
+	for _, p := range probs {
+		sum += p
+	}
+	u := r.Float64() * sum
+	acc := 0.0
+	for i, p := range probs {
+		acc += p
+		if u <= acc {
+			return values[i]
+		}
+	}
+	return values[len(values)-1]
+}
+
+// ===== StartSeedCoordinator: persona per-nodo + Friends/Reputation =====
+
 func StartSeedCoordinator(
 	log *logx.Logger,
 	clock *simclock.Clock,
@@ -39,8 +229,13 @@ func StartSeedCoordinator(
 	reg *seed.Registry,
 	selfID string,
 	pbq *piggyback.Queue,
+	persona NodePersona, // ⬅️ nuovo: profilo per-nodo
 ) {
-	// === Friends & Reputation: init manager + decay loop ===
+	// 1) Allinea soglie "heavy" ai bucket (se presenti)
+	cTh, mTh, gTh := cfg.EffectiveThresholds()
+	affinity.SetThresholds(cTh, mTh, gTh)
+
+	// 2) Friends & Reputation: init + decay + log periodico
 	affCfg := affinity.DefaultConfig()
 	affCfg.HalfLife = 60 * time.Second
 	affCfg.DecayEvery = 5 * time.Second
@@ -51,26 +246,32 @@ func StartSeedCoordinator(
 	aff := affinity.NewManager(affCfg, r, clock)
 	ctxDecay, cancelDecay := context.WithCancel(context.Background())
 	go aff.StartDecayLoop(ctxDecay)
+	aff.StartLogLoop(ctxDecay, 12*time.Second, func(s string) { log.Infof("AFFINITY\n%s", s) })
+
+	// 3) Stampa (una volta) la mix di generazione e le soglie
+	//logWorkloadMixOnce(log, cfg, cTh, mTh, gTh)
+
+	// 4) Generatore per-nodo e LOG della persona
+	gen := newNodeJobGeneratorFromPersona(r, cfg, persona)
+	log.Infof("NODE JOB GEN PERSONA → primary=%s dominance=%.2f mix={GEN=%.2f CPU=%.2f MEM=%.2f GPU=%.2f} rate=%s(×%.2f) mean_interarrival_sim_s=%.2f",
+		className(persona.Primary), persona.Dominance,
+		gen.classP[0], gen.classP[1], gen.classP[2], gen.classP[3],
+		persona.RateLabel, persona.RateFactor, gen.meanS,
+	)
 
 	go func() {
 		defer cancelDecay()
-
-		// piccolo delay iniziale per dare tempo ad AE e SWIM
-		clock.SleepSim(2 * time.Second)
+		clock.SleepSim(2 * time.Second) // lascia stabilizzare AE/SWIM
 
 		for {
-			// 1) Inter-arrivo jobs (SIM)
-			mean := cfg.Workload.MeanInterarrivalSimS
-			if mean <= 0 {
-				mean = 10
-			}
-			waitS := mean * r.ExpFloat64()
+			// 1) Inter-arrivo secondo il mean del nodo (SIM)
+			waitS := gen.meanS * r.ExpFloat64()
 			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
 
-			// 2) Disegna job
-			job := drawJob(r, cfg)
+			// 2) Disegna job secondo classe del nodo
+			job := gen.drawJob()
 
-			// 3) Candidati dal registry (escludi self se necessario nel registry)
+			// 3) Candidati
 			k := cfg.Scheduler.ProbeFanout
 			if k <= 0 {
 				k = 3
@@ -85,10 +286,8 @@ func StartSeedCoordinator(
 				continue
 			}
 
-			// 3bis) Ranking (Friends & Reputation). Se vuoto, fallback random.
-			ordered := rankCandidatesForJob(clock, job, peers, k, aff /*, pbq*/)
+			ordered := rankCandidatesForJob(clock, job, peers, k, aff)
 			if len(ordered) == 0 {
-				// Fallback conservativo: prendi k random unici
 				ordered = samplePeers(peers, k, r)
 				if len(ordered) == 0 {
 					log.Warnf("COORD: nessun candidato per job=%s; ritento più tardi", job.id)
@@ -96,23 +295,20 @@ func StartSeedCoordinator(
 				}
 			}
 
-			// 4) Probe nell'ordine suggerito
-			class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
-			bestAddr := ""
-			bestID := ""
+			// 4) Probe/Commit (+ update reputazione)
+			classesForUpdate := []affinity.JobClass{affinity.PrimaryClass(job.cpu, job.mem, job.gpu)}
+			bestAddr, bestID := "", ""
 			bestScore := -1.0
 
 			for _, p := range ordered {
 				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq)
-				aff.UpdateOnProbe(p.NodeId, class, ok) // hook reputazione
-
-				if ok {
-					if score > bestScore {
-						bestScore = score
-						bestAddr = p.Addr
-						bestID = p.NodeId
-					}
-				} else {
+				for _, cls := range classesForUpdate {
+					aff.UpdateOnProbe(p.NodeId, cls, ok)
+				}
+				if ok && score > bestScore {
+					bestScore, bestAddr, bestID = score, p.Addr, p.NodeId
+				}
+				if !ok {
 					log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
 				}
 			}
@@ -121,56 +317,54 @@ func StartSeedCoordinator(
 				continue
 			}
 
-			// 5) Commit sul vincitore
 			if commitJob(clock, bestAddr, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq) {
-				aff.UpdateOnCommit(bestID, class, affinity.OutcomeCompleted)
+				for _, cls := range classesForUpdate {
+					aff.UpdateOnCommit(bestID, cls, affinity.OutcomeCompleted)
+				}
 				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
 			} else {
-				aff.UpdateOnCommit(bestID, class, affinity.OutcomeRefused)
+				for _, cls := range classesForUpdate {
+					aff.UpdateOnCommit(bestID, cls, affinity.OutcomeRefused)
+				}
 				log.Warnf("COORD COMMIT ✖ target=%s job=%s", bestID, job.id)
 			}
 		}
 	}()
 }
 
-func drawJob(r *mrand.Rand, cfg *config.Config) schedJob {
-	id := fmt.Sprintf("job-%06x", r.Uint32())
-
-	// helper uniformi
-	unif := func(min, max float64) float64 {
-		if max <= min {
-			return min
-		}
-		return min + r.Float64()*(max-min)
+func className(i int) string {
+	switch i {
+	case 1:
+		return "CPU_ONLY"
+	case 2:
+		return "MEM_HEAVY"
+	case 3:
+		return "GPU_HEAVY"
+	default:
+		return "GENERAL"
 	}
+}
 
-	// percentuali
-	cpu := unif(cfg.Workload.JobCPU.MinPct, cfg.Workload.JobCPU.MaxPct)
-	mem := unif(cfg.Workload.JobMEM.MinPct, cfg.Workload.JobMEM.MaxPct)
-
-	// GPU: se range > 0 la usiamo, altrimenti restiamo a 0
-	gpu := 0.0
-	if cfg.Workload.JobGPU.MaxPct > 0 {
-		gpu = unif(cfg.Workload.JobGPU.MinPct, cfg.Workload.JobGPU.MaxPct)
+// stampa una volta la mix di generazione e soglie heavy effettive
+func logWorkloadMixOnce(log *logx.Logger, cfg *config.Config, cTh, mTh, gTh float64) {
+	if cfg.Workload.UseBuckets() {
+		cb, mb, gb, db := cfg.Workload.CPUBuckets, cfg.Workload.MEMBuckets, cfg.Workload.GPUBuckets, cfg.Workload.DurationBuckets
+		log.Infof("JOB GEN MIX (bucket/prob): CPU[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f]  MEM[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f]  GPU[s=%.0f,m=%.0f,l=%.0f | p=%.2f/%.2f/%.2f]  DUR[s=%.0fs,m=%.0fs,l=%.0fs | p=%.2f/%.2f/%.2f]",
+			cb.SmallPct, cb.MediumPct, cb.LargePct, cb.ProbSmall, cb.ProbMedium, cb.ProbLarge,
+			mb.SmallPct, mb.MediumPct, mb.LargePct, mb.ProbSmall, mb.ProbMedium, mb.ProbLarge,
+			gb.SmallPct, gb.MediumPct, gb.LargePct, gb.ProbSmall, gb.ProbMedium, gb.ProbLarge,
+			db.SmallSimS, db.MediumSimS, db.LargeSimS, db.ProbSmall, db.ProbMedium, db.ProbLarge,
+		)
+	} else {
+		log.Infof("JOB GEN MIX (legacy ranges): CPU[%.0f..%.0f] MEM[%.0f..%.0f] GPU[%.0f..%.0f] DUR[%.0fs..%.0fs]",
+			cfg.Workload.JobCPU.MinPct, cfg.Workload.JobCPU.MaxPct,
+			cfg.Workload.JobMEM.MinPct, cfg.Workload.JobMEM.MaxPct,
+			cfg.Workload.JobGPU.MinPct, cfg.Workload.JobGPU.MaxPct,
+			cfg.Workload.JobDurationSimS.MinS, cfg.Workload.JobDurationSimS.MaxS,
+		)
 	}
-
-	// durata (tempo SIM)
-	dmin := cfg.Workload.JobDurationSimS.MinS
-	dmax := cfg.Workload.JobDurationSimS.MaxS
-	if dmax <= dmin {
-		dmax = dmin
-	}
-	dS := dmin + r.Float64()*(dmax-dmin)
-	dur := time.Duration(dS * float64(time.Second))
-
-	return schedJob{
-		id:       id,
-		cpu:      cpu,
-		mem:      mem,
-		gpu:      gpu,
-		duration: dur,
-	}
+	log.Infof("AFFINITY HEAVY THRESHOLDS → CPU≥%.0f%%  MEM≥%.0f%%  GPU≥%.0f%%", cTh, mTh, gTh)
 }
 
 func samplePeers(in []*proto.PeerInfo, k int, r *mrand.Rand) []*proto.PeerInfo {
@@ -194,14 +388,11 @@ func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, ti
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	// --- CORREZIONE: Utilizziamo un dialer gRPC standard con l'interceptor,
-	// invece della funzione custom che creava problemi. ---
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
-		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)), // Aggiungiamo l'interceptor qui
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)),
 	)
-
 	if err != nil {
 		return false, 0, "dial_error"
 	}
@@ -215,9 +406,7 @@ func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, ti
 		GpuPct:     job.gpu,
 		DurationMs: int64(job.duration / time.Millisecond),
 	}
-	rep, err := cli.Probe(ctx, &proto.ProbeRequest{
-		Job: js,
-	})
+	rep, err := cli.Probe(ctx, &proto.ProbeRequest{Job: js})
 	if err != nil {
 		return false, 0, "rpc_error"
 	}
@@ -228,11 +417,10 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	// --- CORREZIONE: Stessa modifica anche qui ---
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
-		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)), // Aggiungiamo l'interceptor qui
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(pbq)),
 	)
 	if err != nil {
 		return false
@@ -252,16 +440,12 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 }
 
 // rankCandidatesForJob ordina i candidati usando Friends & Reputation.
-// I segnali Piggyback/AE/Cool-off sono lasciati neutri (stub) per compilare subito.
-// topK: quanti candidati vuoi davvero sondare con Probe.
-// rankCandidatesForJob: usa Friends & Reputation; segnali piggyback/AE/cool-off per ora neutri
 func rankCandidatesForJob(
 	clock *simclock.Clock,
 	job schedJob,
 	sampled []*proto.PeerInfo,
 	topK int,
 	aff *affinity.Manager,
-	// pbq *piggyback.Queue,
 ) []*proto.PeerInfo {
 
 	class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
@@ -269,9 +453,8 @@ func rankCandidatesForJob(
 	id2peer := make(map[string]*proto.PeerInfo, len(sampled))
 	cands := make([]affinity.Candidate, 0, len(sampled))
 
-	// 🔧 FIX: usare il metodo del clock, non funzioni globali inesistenti
 	nowMs := clock.NowSimMs()
-	_ = nowMs // (lo useremo quando aggiungiamo il cool-off)
+	_ = nowMs
 
 	for _, p := range sampled {
 		if p == nil {
@@ -280,15 +463,11 @@ func rankCandidatesForJob(
 		id2peer[p.NodeId] = p
 
 		// ==== STUB segnali (neutri finché non leghiamo piggyback/AE/cool-off) ====
-		hasGPU := true   // TODO: derivare da AE quando disponibile
-		advAvail := -1.0 // -1 = ignoto (neutro)
-		fresh := true    // nessuna penalità staleness
-		penalty := 0.0   // cool-off non ancora propagato via piggyback
-
-		// Carico previsto: ignoto per ora → neutro (-1).
+		hasGPU := true
+		advAvail := -1.0
+		fresh := true
+		penalty := 0.0
 		projected := -1.0
-		// Quando collegherai AE:
-		// projected = affinity.ProjectedLoadByClass(cpuPct, memPct, gpuPct, class, hasGPU)
 
 		cands = append(cands, affinity.Candidate{
 			PeerID:          p.NodeId,
@@ -304,7 +483,6 @@ func rankCandidatesForJob(
 	if len(scored) == 0 {
 		return nil
 	}
-
 	out := make([]*proto.PeerInfo, 0, len(scored))
 	seen := make(map[string]struct{}, len(scored))
 	for _, sc := range scored {

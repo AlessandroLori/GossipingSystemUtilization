@@ -1,31 +1,48 @@
 package affinity
 
+// Classi
 type JobClass uint8
 
 const (
 	ClassCPUOnly JobClass = iota
 	ClassGPUHeavy
 	ClassMemHeavy
-	ClassGeneral // NEW: job non massicci su tutte le risorse
+	ClassGeneral
 )
 
-// Soglie semplici in percentuale (0..100)
-const (
-	cpuHeavy = 70.0
-	memHeavy = 70.0
-	gpuHeavy = 50.0 // "richiede GPU in modo significativo"
-)
+// soglie "heavy" configurabili a runtime
+var cpuHeavyTh = 70.0
+var memHeavyTh = 70.0
+var gpuHeavyTh = 50.0
 
-// Deriva la classe dal JobSpec (percentuali richieste)
-func GuessClass(cpuPct, memPct, gpuPct float64) JobClass {
+// SetThresholds consente di allineare le soglie alle config (es. bucket.large_pct)
+func SetThresholds(cpu, mem, gpu float64) {
+	if cpu > 0 {
+		cpuHeavyTh = cpu
+	}
+	if mem > 0 {
+		memHeavyTh = mem
+	}
+	if gpu > 0 {
+		gpuHeavyTh = gpu
+	}
+}
+
+// PrimaryClass: usa le soglie correnti
+func PrimaryClass(cpuPct, memPct, gpuPct float64) JobClass {
 	switch {
-	case gpuPct >= gpuHeavy:
+	case gpuPct >= gpuHeavyTh:
 		return ClassGPUHeavy
-	case memPct >= memHeavy:
+	case memPct >= memHeavyTh:
 		return ClassMemHeavy
-	case cpuPct >= cpuHeavy:
+	case cpuPct >= cpuHeavyTh:
 		return ClassCPUOnly
 	default:
 		return ClassGeneral
 	}
+}
+
+// Alias per retrocompat
+func GuessClass(cpuPct, memPct, gpuPct float64) JobClass {
+	return PrimaryClass(cpuPct, memPct, gpuPct)
 }

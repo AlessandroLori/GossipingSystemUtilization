@@ -2,9 +2,11 @@ package affinity
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
+	"strings"
 	"time"
 
 	"GossipSystemUtilization/internal/simclock"
@@ -49,7 +51,8 @@ func (m *Manager) StartDecayLoop(ctx context.Context) {
 	}()
 }
 
-// Hook esterni
+// ===== Hooks =====
+
 func (m *Manager) UpdateOnProbe(peer string, class JobClass, accepted bool) {
 	m.rep.UpdateOnProbe(class, peer, accepted)
 }
@@ -60,7 +63,8 @@ func (m *Manager) TouchFriend(peer string, class JobClass) {
 	m.fr.Touch(class, peer, m.clk.NowSimMs())
 }
 
-// Ranking composito P (reputation), A (piggyback avail), L (least-load da AE), -X (cooldown)
+// ===== Scoring & Ranking =====
+
 func (m *Manager) scoreOne(class JobClass, c Candidate) float64 {
 	// Incompatibilità hard
 	if class == ClassGPUHeavy && !c.HasGPU {
@@ -222,4 +226,133 @@ func ProjectedLoadByClass(cpuPct, memPct, gpuPct float64, class JobClass, hasGPU
 	default:
 		return 1.0
 	}
+}
+
+// ===== Pretty logging (dump) =====
+
+func className(c JobClass) string {
+	switch c {
+	case ClassCPUOnly:
+		return "CPU_ONLY"
+	case ClassGPUHeavy:
+		return "GPU_HEAVY"
+	case ClassMemHeavy:
+		return "MEM_HEAVY"
+	case ClassGeneral:
+		return "GENERAL"
+	default:
+		return fmt.Sprintf("CLASS_%d", c)
+	}
+}
+
+// DumpString restituisce una stringa leggibile con:
+//   - Top-N peer per reputazione (score e "age" dall'ultimo update)
+//   - Friends (lista abbreviata con età ultima vista)
+func (m *Manager) DumpString(maxPerClass int) string {
+	if maxPerClass <= 0 {
+		maxPerClass = 8
+	}
+	nowMs := m.clk.NowSimMs()
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Friends & Reputation @ %s (SIM)\n", m.clk.NowSim().Format("15:04:05.000"))
+
+	classes := []JobClass{ClassCPUOnly, ClassMemHeavy, ClassGPUHeavy, ClassGeneral}
+	for _, cls := range classes {
+		// --- snapshot reputazione (copy sotto lock) ---
+		type pair struct {
+			peer  string
+			score float64
+			ageMs int64
+		}
+		reps := make([]pair, 0, 32)
+		func() {
+			m.rep.mu.RLock()
+			defer m.rep.mu.RUnlock()
+			if mp := m.rep.table[cls]; mp != nil {
+				for p, e := range mp {
+					age := nowMs - e.UpdatedSim
+					reps = append(reps, pair{peer: p, score: e.Score, ageMs: age})
+				}
+			}
+		}()
+		sort.Slice(reps, func(i, j int) bool { return reps[i].score > reps[j].score })
+		if len(reps) > maxPerClass {
+			reps = reps[:maxPerClass]
+		}
+
+		// --- snapshot friends (copy sotto lock) ---
+		type fpair struct {
+			peer  string
+			ageMs int64
+		}
+		friends := make([]fpair, 0, 32)
+		func() {
+			m.fr.mu.Lock()
+			defer m.fr.mu.Unlock()
+			if mp := m.fr.table[cls]; mp != nil {
+				for p, ts := range mp {
+					age := nowMs - ts
+					friends = append(friends, fpair{peer: p, ageMs: age})
+				}
+			}
+		}()
+		sort.Slice(friends, func(i, j int) bool { return friends[i].ageMs < friends[j].ageMs })
+		if len(friends) > maxPerClass {
+			friends = friends[:maxPerClass]
+		}
+
+		// --- stampa sezione classe ---
+		fmt.Fprintf(&b, "· %s\n", className(cls))
+
+		if len(reps) == 0 {
+			fmt.Fprintf(&b, "   TopRep: (vuoto)\n")
+		} else {
+			fmt.Fprintf(&b, "   TopRep: ")
+			for i, r := range reps {
+				if i > 0 {
+					b.WriteString(" | ")
+				}
+				fmt.Fprintf(&b, "%s s=%.2f age=%.1fs", r.peer, r.score, float64(r.ageMs)/1000.0)
+			}
+			b.WriteByte('\n')
+		}
+
+		if len(friends) == 0 {
+			fmt.Fprintf(&b, "   Friends: (vuoto)\n")
+		} else {
+			fmt.Fprintf(&b, "   Friends: ")
+			for i, f := range friends {
+				if i > 0 {
+					b.WriteString(" | ")
+				}
+				fmt.Fprintf(&b, "%s age=%.1fs", f.peer, float64(f.ageMs)/1000.0)
+			}
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+// StartLogLoop stampa periodicamente il dump leggibile usando la sink passata.
+// Esempio di sink: func(s string){ log.Infof("AFFINITY\n%s", s) }
+func (m *Manager) StartLogLoop(ctx context.Context, interval time.Duration, sink func(string)) {
+	if interval <= 0 {
+		interval = 12 * time.Second
+	}
+	if sink == nil {
+		sink = func(string) {}
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				s := m.DumpString(8)
+				sink(s)
+				m.clk.SleepSim(interval)
+			}
+		}
+	}()
 }

@@ -33,32 +33,33 @@
       "prob_large": 0.10
     },
 
-    "cpu_buckets": {
-      "small_pct": 5.0,
-      "medium_pct": 15.0,
-      "large_pct": 30.0,
-      "prob_small": 0.60,
-      "prob_medium": 0.30,
-      "prob_large": 0.10
-    },
+  "cpu_buckets": {
+    "small_pct": 5.0,
+    "medium_pct": 15.0,
+    "large_pct": 70.0,
+    "prob_small": 0.60,
+    "prob_medium": 0.30,
+    "prob_large": 0.10
+  },
 
-    "mem_buckets": {
-      "small_pct": 5.0,
-      "medium_pct": 15.0,
-      "large_pct": 30.0,
-      "prob_small": 0.60,
-      "prob_medium": 0.30,
-      "prob_large": 0.10
-    },
+  "mem_buckets": {
+    "small_pct": 5.0,
+    "medium_pct": 15.0,
+    "large_pct": 65.0,
+    "prob_small": 0.60,
+    "prob_medium": 0.30,
+    "prob_large": 0.10
+  },
 
-    "gpu_buckets": {
-      "small_pct": 5.0,
-      "medium_pct": 15.0,
-      "large_pct": 30.0,
-      "prob_small": 0.20,
-      "prob_medium": 0.10,
-      "prob_large": 0.05
-    }
+  "gpu_buckets": {
+    "small_pct": 5.0,
+    "medium_pct": 15.0,
+    "large_pct": 60.0,
+    "prob_small": 0.20,
+    "prob_medium": 0.10,
+    "prob_large": 0.05
+  }
+
   },
 
   "scheduler": {

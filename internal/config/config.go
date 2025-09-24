@@ -56,6 +56,28 @@ type BgParams struct {
 	GPUStddevPP float64 `json:"gpu_stddev_pp"`
 }
 
+// ======== NUOVO: bucket + probabilità ========
+
+// Percentuali (0..100) con triple Small/Medium/Large + Probabilità
+type ProbBucketsPct struct {
+	SmallPct   float64 `json:"small_pct"`
+	MediumPct  float64 `json:"medium_pct"`
+	LargePct   float64 `json:"large_pct"`
+	ProbSmall  float64 `json:"prob_small"`
+	ProbMedium float64 `json:"prob_medium"`
+	ProbLarge  float64 `json:"prob_large"`
+}
+
+// Durate in secondi simulati con triple Small/Medium/Large + Probabilità
+type ProbBucketsDur struct {
+	SmallSimS  float64 `json:"small_sim_s"`
+	MediumSimS float64 `json:"medium_sim_s"`
+	LargeSimS  float64 `json:"large_sim_s"`
+	ProbSmall  float64 `json:"prob_small"`
+	ProbMedium float64 `json:"prob_medium"`
+	ProbLarge  float64 `json:"prob_large"`
+}
+
 // ===== Workload (iperparametri job) =====
 
 type Workload struct {
@@ -65,6 +87,12 @@ type Workload struct {
 	JobMEM               RangePct      `json:"job_mem"`
 	JobGPU               RangePct      `json:"job_gpu"`
 	JobDurationSimS      DurationRange `json:"job_duration_sim_s"`
+
+	// (NUOVO) Bucket + probabilità; se TUTTI presenti, sovrascrivono i range legacy
+	CPUBuckets      *ProbBucketsPct `json:"cpu_buckets,omitempty"`
+	MEMBuckets      *ProbBucketsPct `json:"mem_buckets,omitempty"`
+	GPUBuckets      *ProbBucketsPct `json:"gpu_buckets,omitempty"`
+	DurationBuckets *ProbBucketsDur `json:"duration_buckets,omitempty"`
 }
 
 type RangePct struct {
@@ -75,6 +103,55 @@ type RangePct struct {
 type DurationRange struct {
 	MinS float64 `json:"min_s"`
 	MaxS float64 `json:"max_s"`
+}
+
+// Usa i bucket (invece dei range) solo se sono TUTTI presenti
+func (w *Workload) UseBuckets() bool {
+	return w != nil && w.CPUBuckets != nil && w.MEMBuckets != nil && w.GPUBuckets != nil && w.DurationBuckets != nil
+}
+
+// Normalizza le terne di probabilità dei bucket, se presenti
+func (w *Workload) normalize() {
+	if w == nil {
+		return
+	}
+	if w.CPUBuckets != nil {
+		norm3(&w.CPUBuckets.ProbSmall, &w.CPUBuckets.ProbMedium, &w.CPUBuckets.ProbLarge)
+	}
+	if w.MEMBuckets != nil {
+		norm3(&w.MEMBuckets.ProbSmall, &w.MEMBuckets.ProbMedium, &w.MEMBuckets.ProbLarge)
+	}
+	if w.GPUBuckets != nil {
+		norm3(&w.GPUBuckets.ProbSmall, &w.GPUBuckets.ProbMedium, &w.GPUBuckets.ProbLarge)
+	}
+	if w.DurationBuckets != nil {
+		norm3(&w.DurationBuckets.ProbSmall, &w.DurationBuckets.ProbMedium, &w.DurationBuckets.ProbLarge)
+	}
+}
+
+func norm3(a, b, c *float64) {
+	sum := *a + *b + *c
+	if sum <= 0 {
+		return
+	}
+	*a /= sum
+	*b /= sum
+	*c /= sum
+}
+
+// Soglie heavy effettive: default (70/70/50), ma se ci sono i bucket usiamo i "large"
+func (c *Config) EffectiveThresholds() (cpuHeavy, memHeavy, gpuHeavy float64) {
+	cpuHeavy, memHeavy, gpuHeavy = 70.0, 70.0, 50.0
+	if c.Workload.CPUBuckets != nil && c.Workload.CPUBuckets.LargePct > 0 {
+		cpuHeavy = c.Workload.CPUBuckets.LargePct
+	}
+	if c.Workload.MEMBuckets != nil && c.Workload.MEMBuckets.LargePct > 0 {
+		memHeavy = c.Workload.MEMBuckets.LargePct
+	}
+	if c.Workload.GPUBuckets != nil && c.Workload.GPUBuckets.LargePct > 0 {
+		gpuHeavy = c.Workload.GPUBuckets.LargePct
+	}
+	return
 }
 
 // ===== Scheduler (Probe/Commit) =====
@@ -118,6 +195,9 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, err
 	}
+
+	// (NUOVO) normalizza le probabilità dei bucket, se presenti
+	c.Workload.normalize()
 
 	c.applyDefaults() // defaults non-faults
 
