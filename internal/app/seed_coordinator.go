@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	mrand "math/rand"
@@ -85,7 +86,6 @@ func (g *nodeJobGenerator) pickClass() int {
 // sampling valori coerenti con la classe scelta
 func (g *nodeJobGenerator) drawJob() schedJob {
 	id := fmt.Sprintf("job-%06x", g.r.Uint32())
-
 	cls := g.pickClass()
 
 	// Helpers
@@ -95,33 +95,57 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 		}
 		return min + g.r.Float64()*(max-min)
 	}
+	// Campiona "sotto" una soglia; se il range bucket è già sopra la soglia, rientra verso la soglia.
 	sampleBelow := func(min, max, upper float64) float64 {
-		hi := max
-		if upper < hi {
-			hi = upper
+		if upper <= 0 {
+			return 0
 		}
+		hi := math.Min(max, upper)
 		if hi <= min {
-			return min + 0.5*(max-min)
+			// Il bucket è troppo alto rispetto alla soglia: spingi verso valori davvero "low".
+			lo := upper * 0.35
+			hi2 := upper * 0.95
+			if hi2 <= lo {
+				return math.Max(0, upper*0.9)
+			}
+			return unif(lo, hi2)
 		}
 		return unif(min, hi)
 	}
+	// ⇒ garantisce value ≥ lower (se il range è troppo basso, allarghiamo la coda alta)
 	sampleAtLeast := func(min, max, lower float64) float64 {
 		lo := min
 		if lower > lo {
 			lo = lower
 		}
-		if max <= lo {
-			return max
+		hi := max
+		if hi < lo {
+			hi = 100.0
+		} // estendi fino a 100 se serve
+		if hi > 100 {
+			hi = 100
 		}
-		// bias verso coda alta
+		if lo < 0 {
+			lo = 0
+		}
+		// bias verso la coda alta
 		u := 0.7 + 0.3*g.r.Float64()
-		return lo + u*(max-lo)
+		return lo + u*(hi-lo)
+	}
+	capIfNoExplicit := func(curMax float64) float64 {
+		// Se assente o "aperto" (0 o >=100), usa 50 come cap di default
+		if curMax <= 0 || curMax >= 100 {
+			return 50
+		}
+		return curMax
 	}
 
-	// leggi intervalli da config (se buckets, usa anchor ±20%)
-	var cpuMin, cpuMax = g.cfg.Workload.JobCPU.MinPct, g.cfg.Workload.JobCPU.MaxPct
-	var memMin, memMax = g.cfg.Workload.JobMEM.MinPct, g.cfg.Workload.JobMEM.MaxPct
-	var gpuMin, gpuMax = g.cfg.Workload.JobGPU.MinPct, g.cfg.Workload.JobGPU.MaxPct
+	// Leggi intervalli base
+	cpuMin, cpuMax := g.cfg.Workload.JobCPU.MinPct, g.cfg.Workload.JobCPU.MaxPct
+	memMin, memMax := g.cfg.Workload.JobMEM.MinPct, g.cfg.Workload.JobMEM.MaxPct
+	gpuMin, gpuMax := g.cfg.Workload.JobGPU.MinPct, g.cfg.Workload.JobGPU.MaxPct
+
+	// Se buckets attivi, usa gli anchor pesati: "Large" SOLO sulla risorsa heavy della classe.
 	if g.cfg.Workload.UseBuckets() {
 		cb, mb, gb := g.cfg.Workload.CPUBuckets, g.cfg.Workload.MEMBuckets, g.cfg.Workload.GPUBuckets
 		expand := func(anchor float64) (float64, float64) {
@@ -138,32 +162,67 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 			}
 			return lo, hi
 		}
-		cpuMin, cpuMax = expand(weightedAnchor(cls, cb, g))
-		memMin, memMax = expand(weightedAnchor(cls, mb, g))
-		gpuMin, gpuMax = expand(weightedAnchor(cls, gb, g))
+		cpuMin, cpuMax = expand(weightedAnchor(cls, "cpu", cb, g))
+		memMin, memMax = expand(weightedAnchor(cls, "mem", mb, g))
+		gpuMin, gpuMax = expand(weightedAnchor(cls, "gpu", gb, g))
 	}
 
+	// Per GENERAL, se non c'è cap esplicito mettiamo 50 max (1–50).
+	if cls == 0 { // GENERAL
+		// Non toccare cap espliciti <50 (li rispettiamo), ma se "aperti" li portiamo a 50.
+		if !g.cfg.Workload.UseBuckets() {
+			cpuMax = capIfNoExplicit(cpuMax)
+			memMax = capIfNoExplicit(memMax)
+			gpuMax = capIfNoExplicit(gpuMax)
+		}
+		// In ogni caso, impedisci che i bucket spingano sopra 50 per GENERAL.
+		cpuMax = math.Min(cpuMax, 50)
+		memMax = math.Min(memMax, 50)
+		gpuMax = math.Min(gpuMax, 50)
+
+		// assicura min ragionevoli
+		if cpuMin < 1 {
+			cpuMin = 1
+		}
+		if memMin < 1 {
+			memMin = 1
+		}
+		if gpuMin < 1 {
+			gpuMin = 1
+		}
+		if cpuMin >= cpuMax {
+			cpuMin = math.Max(0, cpuMax-1)
+		}
+		if memMin >= memMax {
+			memMin = math.Max(0, memMax-1)
+		}
+		if gpuMin >= gpuMax {
+			gpuMin = math.Max(0, gpuMax-1)
+		}
+	}
+
+	// Campionamento coerente con la classe
 	var cpu, mem, gpu float64
 	switch cls {
 	case 1: // CPU_ONLY
-		cpu = sampleAtLeast(cpuMin, cpuMax, g.cpuTh)
-		mem = sampleBelow(memMin, memMax, g.memTh)
+		cpu = sampleAtLeast(cpuMin, cpuMax, g.cpuTh) // ≥ soglia (es. 70)
+		mem = sampleBelow(memMin, memMax, g.memTh)   // sotto soglia
 		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh*0.5)
 	case 2: // MEM_HEAVY
-		mem = sampleAtLeast(memMin, memMax, g.memTh)
+		mem = sampleAtLeast(memMin, memMax, g.memTh) // ≥ soglia (es. 65)
 		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
 		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh*0.5)
 	case 3: // GPU_HEAVY
-		gpu = sampleAtLeast(gpuMin, gpuMax, g.gpuTh)
+		gpu = sampleAtLeast(gpuMin, gpuMax, g.gpuTh) // ≥ soglia (es. 60)
 		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
 		mem = sampleBelow(memMin, memMax, g.memTh)
 	default: // 0: GENERAL
-		cpu = sampleBelow(cpuMin, cpuMax, g.cpuTh)
-		mem = sampleBelow(memMin, memMax, g.memTh)
-		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh)
+		cpu = sampleBelow(cpuMin, cpuMax, 50)
+		mem = sampleBelow(memMin, memMax, 50)
+		gpu = sampleBelow(gpuMin, gpuMax, 50)
 	}
 
-	// durata
+	// Durata
 	var dur time.Duration
 	if g.cfg.Workload.UseBuckets() && g.cfg.Workload.DurationBuckets != nil {
 		db := g.cfg.Workload.DurationBuckets
@@ -191,10 +250,24 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 	return schedJob{id: id, cpu: cpu, mem: mem, gpu: gpu, duration: dur}
 }
 
-func weightedAnchor(cls int, b *config.ProbBucketsPct, g *nodeJobGenerator) float64 {
+// weightedAnchor: applica Large SOLO sulla risorsa heavy della classe; altrimenti usa le probabilità.
+func weightedAnchor(cls int, kind string, b *config.ProbBucketsPct, g *nodeJobGenerator) float64 {
 	if b == nil {
 		return 10
 	}
+	isHeavy := false
+	switch cls {
+	case 1: // CPU_ONLY
+		isHeavy = (kind == "cpu")
+	case 2: // MEM_HEAVY
+		isHeavy = (kind == "mem")
+	case 3: // GPU_HEAVY
+		isHeavy = (kind == "gpu")
+	}
+	if isHeavy {
+		return b.LargePct
+	}
+	// GENERALE o risorse "non heavy" → pesato Small/Medium/Large secondo le prob.
 	anchors := []float64{b.SmallPct, b.MediumPct, b.LargePct}
 	probs := []float64{b.ProbSmall, b.ProbMedium, b.ProbLarge}
 	return pickByProb(g.r, probs, anchors)
