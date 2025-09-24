@@ -1,4 +1,3 @@
-// app/seed_coordinator.go
 package app
 
 import (
@@ -13,6 +12,7 @@ import (
 
 	"GossipSystemUtilization/internal/config"
 	//"GossipSystemUtilization/internal/grpcserver"
+	"GossipSystemUtilization/internal/affinity"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
@@ -30,6 +30,7 @@ type schedJob struct {
 	duration time.Duration
 }
 
+// StartSeedCoordinator: versione con Friends & Reputation e decay legato al clock simulato
 func StartSeedCoordinator(
 	log *logx.Logger,
 	clock *simclock.Clock,
@@ -39,30 +40,43 @@ func StartSeedCoordinator(
 	selfID string,
 	pbq *piggyback.Queue,
 ) {
+	// === Friends & Reputation: init manager + decay loop ===
+	affCfg := affinity.DefaultConfig()
+	affCfg.HalfLife = 60 * time.Second
+	affCfg.DecayEvery = 5 * time.Second
+	affCfg.WReputation, affCfg.WPiggyback, affCfg.WLeastLoad, affCfg.WPenalty = 0.5, 0.3, 0.2, 0.4
+	affCfg.Epsilon, affCfg.SoftmaxTemp = 0.10, 0.20
+	affCfg.StaleCutoff = 5 * time.Second
+
+	aff := affinity.NewManager(affCfg, r, clock)
+	ctxDecay, cancelDecay := context.WithCancel(context.Background())
+	go aff.StartDecayLoop(ctxDecay)
+
 	go func() {
-		// opzionale: un piccolo delay iniziale per dare tempo all'anti-entropy
+		defer cancelDecay()
+
+		// piccolo delay iniziale per dare tempo ad AE e SWIM
 		clock.SleepSim(2 * time.Second)
 
 		for {
-			// 1) Attendi il prossimo job (inter-arrivo esponenziale in tempo SIM)
+			// 1) Inter-arrivo jobs (SIM)
 			mean := cfg.Workload.MeanInterarrivalSimS
 			if mean <= 0 {
-				mean = 10 // fallback robusto
+				mean = 10
 			}
-			waitS := mean * r.ExpFloat64() // Exp(lambda=1) → mean scaling
+			waitS := mean * r.ExpFloat64()
 			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
 
-			// 2) Disegna un job dalle distribuzioni del config
+			// 2) Disegna job
 			job := drawJob(r, cfg)
 
-			// 3) Scegli i candidati dal registry del seed (escludendo me stesso)
-			//    campioniamo un po' di peer e poi da quelli prendiamo k per la Probe
+			// 3) Candidati dal registry (escludi self se necessario nel registry)
 			k := cfg.Scheduler.ProbeFanout
 			if k <= 0 {
 				k = 3
 			}
 			candidates := 2 * k
-			peers := []*proto.PeerInfo(nil)
+			var peers []*proto.PeerInfo
 			if reg != nil {
 				peers = reg.SamplePeers(selfID, candidates)
 			}
@@ -70,14 +84,28 @@ func StartSeedCoordinator(
 				log.Warnf("COORD: nessun peer disponibile per job=%s; ritento più tardi", job.id)
 				continue
 			}
-			peers = samplePeers(peers, k, r)
 
-			// 4) Probe dei candidati e scelta del migliore
+			// 3bis) Ranking (Friends & Reputation). Se vuoto, fallback random.
+			ordered := rankCandidatesForJob(clock, job, peers, k, aff /*, pbq*/)
+			if len(ordered) == 0 {
+				// Fallback conservativo: prendi k random unici
+				ordered = samplePeers(peers, k, r)
+				if len(ordered) == 0 {
+					log.Warnf("COORD: nessun candidato per job=%s; ritento più tardi", job.id)
+					continue
+				}
+			}
+
+			// 4) Probe nell'ordine suggerito
+			class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
 			bestAddr := ""
 			bestID := ""
 			bestScore := -1.0
-			for _, p := range peers {
+
+			for _, p := range ordered {
 				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq)
+				aff.UpdateOnProbe(p.NodeId, class, ok) // hook reputazione
+
 				if ok {
 					if score > bestScore {
 						bestScore = score
@@ -95,9 +123,11 @@ func StartSeedCoordinator(
 
 			// 5) Commit sul vincitore
 			if commitJob(clock, bestAddr, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq) {
+				aff.UpdateOnCommit(bestID, class, affinity.OutcomeCompleted)
 				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
 			} else {
+				aff.UpdateOnCommit(bestID, class, affinity.OutcomeRefused)
 				log.Warnf("COORD COMMIT ✖ target=%s job=%s", bestID, job.id)
 			}
 		}
@@ -219,4 +249,71 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 		DurationMs: int64(job.duration / time.Millisecond),
 	})
 	return err == nil
+}
+
+// rankCandidatesForJob ordina i candidati usando Friends & Reputation.
+// I segnali Piggyback/AE/Cool-off sono lasciati neutri (stub) per compilare subito.
+// topK: quanti candidati vuoi davvero sondare con Probe.
+// rankCandidatesForJob: usa Friends & Reputation; segnali piggyback/AE/cool-off per ora neutri
+func rankCandidatesForJob(
+	clock *simclock.Clock,
+	job schedJob,
+	sampled []*proto.PeerInfo,
+	topK int,
+	aff *affinity.Manager,
+	// pbq *piggyback.Queue,
+) []*proto.PeerInfo {
+
+	class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
+
+	id2peer := make(map[string]*proto.PeerInfo, len(sampled))
+	cands := make([]affinity.Candidate, 0, len(sampled))
+
+	// 🔧 FIX: usare il metodo del clock, non funzioni globali inesistenti
+	nowMs := clock.NowSimMs()
+	_ = nowMs // (lo useremo quando aggiungiamo il cool-off)
+
+	for _, p := range sampled {
+		if p == nil {
+			continue
+		}
+		id2peer[p.NodeId] = p
+
+		// ==== STUB segnali (neutri finché non leghiamo piggyback/AE/cool-off) ====
+		hasGPU := true   // TODO: derivare da AE quando disponibile
+		advAvail := -1.0 // -1 = ignoto (neutro)
+		fresh := true    // nessuna penalità staleness
+		penalty := 0.0   // cool-off non ancora propagato via piggyback
+
+		// Carico previsto: ignoto per ora → neutro (-1).
+		projected := -1.0
+		// Quando collegherai AE:
+		// projected = affinity.ProjectedLoadByClass(cpuPct, memPct, gpuPct, class, hasGPU)
+
+		cands = append(cands, affinity.Candidate{
+			PeerID:          p.NodeId,
+			HasGPU:          hasGPU,
+			AdvertAvail:     advAvail,
+			ProjectedLoad:   projected,
+			CooldownPenalty: penalty,
+			Fresh:           fresh,
+		})
+	}
+
+	scored := aff.Rank(class, cands, topK)
+	if len(scored) == 0 {
+		return nil
+	}
+
+	out := make([]*proto.PeerInfo, 0, len(scored))
+	seen := make(map[string]struct{}, len(scored))
+	for _, sc := range scored {
+		if p := id2peer[sc.PeerID]; p != nil {
+			if _, dup := seen[p.NodeId]; !dup {
+				out = append(out, p)
+				seen[p.NodeId] = struct{}{}
+			}
+		}
+	}
+	return out
 }
