@@ -1,6 +1,7 @@
 package main
 
-//TODO peers generano job , job spezzati tra i peer , reporter dettagliati per nodo , anti gregge, un nodo per container , semplificazion id nodi (?)
+//TODO meccanismo di leave volontario, peers generano job, job mandati anche random per scoprire rete, seed eseguono i job inviati dai peer come i peer stessi
+// , reporter dettagliati per nodo , un nodo per container , semplificazion id nodi (?)
 
 import (
 	crand "crypto/rand"
@@ -233,23 +234,21 @@ func main() {
 		return
 	}
 
-	// === Coordinator (solo seed): crea la PERSONA e avvialo ===
-	if isSeed && cfg.Workload.Enabled {
-		// 1) Primary class 25% ciascuna
+	// === Coordinator (seed e/o peer) ===
+	if cfg.Workload.Enabled && (isSeed || cfg.Workload.GenerateOnPeers) {
+		// Persona per-nodo (come già fai per il seed)
 		u := r.Float64()
 		primary := 0 // GENERAL
 		switch {
 		case u < 0.25:
-			primary = 0 // GENERAL
+			primary = 0
 		case u < 0.50:
-			primary = 1 // CPU_ONLY
+			primary = 1
 		case u < 0.75:
-			primary = 2 // MEM_HEAVY
+			primary = 2
 		default:
-			primary = 3 // GPU_HEAVY
+			primary = 3
 		}
-
-		// 2) Dominance (quanto pesa la primaria) — override via ENV NODE_PRIMARY_DOMINANCE
 		dominance := getenvFloat("NODE_PRIMARY_DOMINANCE", 0.70)
 		if dominance < 0.50 {
 			dominance = 0.50
@@ -257,7 +256,6 @@ func main() {
 		if dominance > 0.90 {
 			dominance = 0.90
 		}
-
 		mix := [4]float64{}
 		rest := (1.0 - dominance) / 3.0
 		for i := 0; i < 4; i++ {
@@ -265,7 +263,7 @@ func main() {
 		}
 		mix[primary] = dominance
 
-		// 3) Rate (quanto spesso genera) — distribuzione: slow 25%, normal 50%, fast 25%
+		// rate label
 		u2 := r.Float64()
 		rateLabel := "normal"
 		rateFactor := 1.00
@@ -292,7 +290,24 @@ func main() {
 			MeanInterarrivalSimS: meanNode,
 		}
 
+		// Lo stesso coordinator gira sia su seed che su peer
 		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id, rt.PBQueue, persona)
+
+		// === Leave-sim (Graceful leave & recovery) ===
+		app.StartLeaveRecoveryWithRuntime(
+			log, clock, r,
+			app.LeaveProfileInput{
+				Enabled:               cfg.Leaves.Enabled,
+				PrintTransitions:      cfg.Leaves.PrintTransitions,
+				FrequencyClassWeights: cfg.Leaves.FrequencyClassWeights,
+				FrequencyPerMinSim:    cfg.Leaves.FrequencyPerMinSim,
+				DurationClassWeights:  cfg.Leaves.DurationClassWeights,
+				DurationMeanSimS:      cfg.Leaves.DurationMeanSimS,
+			},
+			rt,
+			id,
+		)
+
 	}
 
 	// === Fault-sim (Crash & Recovery) ===

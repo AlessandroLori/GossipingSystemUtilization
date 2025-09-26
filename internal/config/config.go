@@ -18,7 +18,8 @@ type Config struct {
 	Scheduler Scheduler `json:"scheduler"`
 	Faults    Faults    `json:"faults"`
 
-	// ===== NUOVO: pesi/soglie per Friends & Affinity =====
+	// ===== NUOVO =====
+	Leaves          Leaves          `json:"leaves"`
 	FriendsAffinity FriendsAffinity `json:"friends_affinity"`
 }
 
@@ -84,6 +85,7 @@ type ProbBucketsDur struct {
 
 type Workload struct {
 	Enabled              bool          `json:"enabled"`
+	GenerateOnPeers      bool          `json:"generate_on_peers"`
 	MeanInterarrivalSimS float64       `json:"mean_interarrival_sim_s"`
 	JobCPU               RangePct      `json:"job_cpu"`
 	JobMEM               RangePct      `json:"job_mem"`
@@ -181,8 +183,18 @@ func (c *Config) EffectiveThresholds() (cpuHeavy, memHeavy, gpuHeavy float64) {
 // ===== Scheduler (Probe/Commit) =====
 
 type Scheduler struct {
-	ProbeFanout        int `json:"probe_fanout"`
-	ProbeTimeoutRealMs int `json:"probe_timeout_real_ms"`
+	ProbeFanout        int     `json:"probe_fanout"`
+	ProbeTimeoutRealMs int     `json:"probe_timeout_real_ms"`
+	JollyPct           float64 `json:"jolly_pct"`
+}
+
+type Leaves struct {
+	Enabled               *bool              `json:"enabled,omitempty"`
+	PrintTransitions      *bool              `json:"print_transitions,omitempty"`
+	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights,omitempty"` // es: none/low/medium/high
+	FrequencyPerMinSim    map[string]float64 `json:"frequency_per_min_sim,omitempty"`   // rate per classe
+	DurationClassWeights  map[string]float64 `json:"duration_class_weights,omitempty"`  // es: short/medium/long
+	DurationMeanSimS      map[string]float64 `json:"duration_mean_sim_s,omitempty"`     // media durata per classe
 }
 
 // ===== Faults =====
@@ -258,6 +270,10 @@ func (c *Config) applyDefaults() {
 	if c.Scheduler.ProbeTimeoutRealMs <= 0 {
 		c.Scheduler.ProbeTimeoutRealMs = 300
 	}
+	if c.Scheduler.JollyPct < 0 {
+		c.Scheduler.JollyPct = 0
+	}
+
 	// Friends & Affinity defaults
 	if c.FriendsAffinity.WeightPerf == 0 && c.FriendsAffinity.WeightAdvert == 0 && c.FriendsAffinity.WeightLoad == 0 {
 		c.FriendsAffinity.WeightPerf = 0.50

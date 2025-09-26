@@ -22,6 +22,7 @@
 
   "workload": {
     "enabled": true,
+     "generate_on_peers": true,  
     "mean_interarrival_sim_s": 5.0,
 
     "duration_buckets": {
@@ -66,7 +67,10 @@
     "mode": "local",               
     "top_k": 3,
     "overprovision_pct": 5.0,
-    "print_decisions": true
+    "print_decisions": true,
+    "probe_fanout": 3,
+    "probe_timeout_real_ms": 300,
+    "jolly_pct": 0.10 
   },
 
 "faults": {
@@ -91,6 +95,16 @@
 
   "cooldown_sim_ms": 8000,
   "topk": 3
+},
+
+
+"leaves": {                                   
+  "enabled": true,
+  "print_transitions": true,
+  "frequency_class_weights": { "none": 0.3, "low": 0.4, "medium": 0.2, "high": 0.1 },
+  "frequency_per_min_sim":   { "none": 0.0, "low": 0.05, "medium": 0.15, "high": 0.50 },
+  "duration_class_weights":  { "short": 0.5, "medium": 0.35, "long": 0.15 },
+  "duration_mean_sim_s":     { "short": 5,   "medium": 15,   "long": 45   }
 }
 
 

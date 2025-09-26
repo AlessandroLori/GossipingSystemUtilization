@@ -2,7 +2,7 @@ package piggyback
 
 import (
 	"context"
-	"encoding/base64" // <-- Import necessario
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -17,22 +17,21 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// Torniamo a una chiave normale, perché ora i dati saranno stringhe ASCII valide (Base64)
+// metadata key (stringa Base64 “safe”)
 const mdKey = "x-pb"
 
-// ======= BEGIN PATCH: campi Advert (aggiunti HasGPU e BusyUntilMs) =======
+// ======= CAMPi Advert (aggiunti HasGPU, BusyUntilMs, LeaveUntilMs) =======
 type Advert struct {
-	NodeId      string
-	Avail       uint8
-	CreateMs    int64
-	ExpireMs    int64
-	HasGPU      bool  // <--- NUOVO: presenza GPU del peer
-	BusyUntilMs int64 // <--- NUOVO: cool-off (tempo SIM assoluto), 0 se non busy
+	NodeId       string
+	Avail        uint8
+	CreateMs     int64
+	ExpireMs     int64
+	HasGPU       bool  // presenza GPU del peer
+	BusyUntilMs  int64 // cool-off (tempo SIM assoluto), 0 se non busy
+	LeaveUntilMs int64 // leave “graceful” (tempo SIM assoluto), 0 se non in leave
 }
 
-// ======= END PATCH =======
-
-// ... (Queue, NewQueue, UpsertSelfFromStats, Upsert, TakeForSend, better, encodeAvail255 rimangono identici) ...
+// ======= Queue =======
 type Queue struct {
 	log   *logx.Logger
 	clock *simclock.Clock
@@ -42,7 +41,8 @@ type Queue struct {
 	ttl  time.Duration
 	data map[string]Advert // per-node: manteniamo il più recente
 
-	selfBusyUntilMs int64 // protetto da mu
+	selfBusyUntilMs  int64 // protetto da mu
+	selfLeaveUntilMs int64 // protetto da mu
 }
 
 func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duration) *Queue {
@@ -61,10 +61,9 @@ func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duratio
 	}
 }
 
-// ======= BEGIN PATCH: helper Cool-off & Fresh =======
+// ======= Helper Cool-off / Leave / Fresh =======
 
 // SetBusyFor imposta un cool-off (tempo SIM) per il nodo locale.
-// Passa una durata in tempo SIM (es. 8s simulati). Usa 0 per cancellarlo.
 func (q *Queue) SetBusyFor(d time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -78,11 +77,30 @@ func (q *Queue) SetBusyFor(d time.Duration) {
 	q.log.Infof("ANTI-HERD COOLOFF(local) → busy for %v (until=%d)", d, q.selfBusyUntilMs)
 }
 
-// getSelfBusyUntilMs: accesso interno con lock già gestito dal chiamante o safe qui.
+// SetLeaveFor imposta la finestra di “leave” (tempo SIM) per il nodo locale.
+func (q *Queue) SetLeaveFor(d time.Duration) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if d <= 0 {
+		q.selfLeaveUntilMs = 0
+		q.log.Infof("LEAVE(local) → cleared")
+		return
+	}
+	now := q.clock.NowSim().UnixMilli()
+	q.selfLeaveUntilMs = now + d.Milliseconds()
+	q.log.Infof("LEAVE(local) → for %v (until=%d)", d, q.selfLeaveUntilMs)
+}
+
 func (q *Queue) getSelfBusyUntilMs() int64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.selfBusyUntilMs
+}
+
+func (q *Queue) getSelfLeaveUntilMs() int64 {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.selfLeaveUntilMs
 }
 
 // Latest ritorna l'ultimo Advert noto per nodeId.
@@ -94,7 +112,6 @@ func (q *Queue) Latest(nodeId string) (Advert, bool) {
 }
 
 // Fresh dice se il dato piggyback per nodeId è fresco (< staleCutoffMs).
-// nowMs è il tempo SIM corrente in ms.
 func (q *Queue) Fresh(nodeId string, nowMs int64, staleCutoffMs int64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -110,8 +127,7 @@ func (q *Queue) Fresh(nodeId string, nowMs int64, staleCutoffMs int64) bool {
 	return age >= 0 && age <= staleCutoffMs
 }
 
-// BusyPenalty restituisce una penalità 0..1 se il peer è in cool-off.
-// Se manca l’advert o BusyUntil <= now → 0. Se ancora busy → 1 (semplice).
+// BusyPenalty restituisce 1 se il peer è in cool-off, altrimenti 0.
 func (q *Queue) BusyPenalty(nodeId string, nowMs int64) float64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -122,7 +138,7 @@ func (q *Queue) BusyPenalty(nodeId string, nowMs int64) float64 {
 	return 1.0
 }
 
-// ======= END PATCH =======
+// ======= Upsert / TakeForSend =======
 
 func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if s == nil || s.NodeId == "" {
@@ -133,16 +149,18 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if nowMs == 0 {
 		nowMs = q.clock.NowSim().UnixMilli()
 	}
-	// Legge il busy attuale dell'istanza locale
+	// Legge busy/leave attuali dell'istanza locale
 	busy := q.getSelfBusyUntilMs()
+	leave := q.getSelfLeaveUntilMs()
 
 	q.Upsert(Advert{
-		NodeId:      s.NodeId,
-		Avail:       avail,
-		CreateMs:    nowMs,
-		ExpireMs:    nowMs + int64(q.ttl/time.Millisecond),
-		HasGPU:      s.GpuPct >= 0,
-		BusyUntilMs: busy,
+		NodeId:       s.NodeId,
+		Avail:        avail,
+		CreateMs:     nowMs,
+		ExpireMs:     nowMs + int64(q.ttl/time.Millisecond),
+		HasGPU:       s.GpuPct >= 0,
+		BusyUntilMs:  busy,
+		LeaveUntilMs: leave,
 	})
 }
 
@@ -195,6 +213,7 @@ func (q *Queue) TakeForSend(n int) []Advert {
 			buf = append(buf, a)
 		}
 	}
+	// insertion-sort by avail/create/expire (stesso ordine che avevi)
 	for i := 1; i < len(buf); i++ {
 		j := i
 		for j > 0 {
@@ -222,6 +241,8 @@ func better(a, b Advert) bool {
 	return a.ExpireMs > b.ExpireMs
 }
 
+// ======= Interceptors gRPC con piggyback =======
+
 func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 	return func(
 		ctx context.Context,
@@ -236,11 +257,12 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 			if len(ads) > 0 {
 				var summary []string
 				for _, a := range ads {
-					summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU))
+					summary = append(summary,
+						fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
+							a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+					)
 				}
-
 				q.log.Infof("PIGGYBACK SEND → attaching %d adverts: %v", len(ads), summary)
-				// La chiamata a encodeMD ora restituisce una stringa Base64 sicura
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
 			}
 		}
@@ -265,11 +287,20 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 						continue
 					}
 					var summary []string
+					nowMs := q.clock.NowSim().UnixMilli()
 					for _, a := range arr {
-						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU))
+						summary = append(summary,
+							fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
+								a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+						)
 					}
 					q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
 					for _, a := range arr {
+						// Log dedicato “ha lasciato”
+						if a.LeaveUntilMs > nowMs {
+							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
+							q.log.Infof("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
+						}
 						q.Upsert(a)
 					}
 				}
@@ -279,6 +310,8 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 		return resp, err
 	}
 }
+
+// ======= encoding/decoding MD (Base64) =======
 
 func encodeAvail255(s *proto.Stats) uint8 {
 	load := s.CpuPct
@@ -298,15 +331,12 @@ func encodeAvail255(s *proto.Stats) uint8 {
 	return v
 }
 
-// --- MODIFICA CHIAVE: USA BASE64 PER CODIFICARE E DECODIFICARE I DATI BINARI ---
-
-// --- MODIFICA CHIAVE: USA BASE64 PER CODIFICARE E DECODIFICARE I DATI BINARI ---
+// layout: | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) | leave_until(8) |
 func encodeMD(arr []Advert) string {
 	var buf []byte
 	for _, a := range arr {
 		nid := []byte(a.NodeId)
-		// layout: | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) |
-		tmp := make([]byte, 2+len(nid)+1+8+8+1+8)
+		tmp := make([]byte, 2+len(nid)+1+8+8+1+8+8)
 		binary.BigEndian.PutUint16(tmp[0:2], uint16(len(nid)))
 		copy(tmp[2:2+len(nid)], nid)
 		tmp[2+len(nid)] = byte(a.Avail)
@@ -318,6 +348,7 @@ func encodeMD(arr []Advert) string {
 		}
 		tmp[19+len(nid)] = flags
 		binary.BigEndian.PutUint64(tmp[20+len(nid):28+len(nid)], uint64(a.BusyUntilMs))
+		binary.BigEndian.PutUint64(tmp[28+len(nid):36+len(nid)], uint64(a.LeaveUntilMs))
 		buf = append(buf, tmp...)
 	}
 	return base64.RawStdEncoding.EncodeToString(buf)
@@ -331,8 +362,8 @@ func decodeMD(s string) ([]Advert, error) {
 	out := make([]Advert, 0, 3)
 	for len(b) >= 2 {
 		l := int(binary.BigEndian.Uint16(b[0:2]))
-		// minimo richiesto: header + nid + avail + 3x uint64 + flags
-		if len(b) < 2+l+1+8+8+1+8 {
+		// minimo richiesto: header + nid + avail + 3x uint64 + flags + 2x uint64
+		if len(b) < 2+l+1+8+8+1+8+8 {
 			break
 		}
 		nid := string(b[2 : 2+l])
@@ -342,22 +373,23 @@ func decodeMD(s string) ([]Advert, error) {
 		flags := b[19+l]
 		hasGPU := (flags & 0x01) != 0
 		busy := int64(binary.BigEndian.Uint64(b[20+l : 28+l]))
+		leave := int64(binary.BigEndian.Uint64(b[28+l : 36+l]))
 
 		out = append(out, Advert{
-			NodeId:      nid,
-			Avail:       avail,
-			CreateMs:    create,
-			ExpireMs:    exp,
-			HasGPU:      hasGPU,
-			BusyUntilMs: busy,
+			NodeId:       nid,
+			Avail:        avail,
+			CreateMs:     create,
+			ExpireMs:     exp,
+			HasGPU:       hasGPU,
+			BusyUntilMs:  busy,
+			LeaveUntilMs: leave,
 		})
-		b = b[28+l:]
+		b = b[36+l:]
 	}
 	return out, nil
 }
 
 // Lookup2: ritorna (avail, ok, fresh, busyUntilMs) per un peer.
-// fresh = true se l'advert non è troppo vecchio (<= staleCutoffMs) e non è scaduto.
 func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail uint8, ok bool, fresh bool, busyUntilMs int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

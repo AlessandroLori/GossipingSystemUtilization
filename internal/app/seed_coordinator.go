@@ -301,6 +301,41 @@ func pickByProb(r *mrand.Rand, probs []float64, values []float64) float64 {
 	return values[len(values)-1]
 }
 
+// jolly candidate
+func withJollyCandidate(ordered []*proto.PeerInfo, all []*proto.PeerInfo, r *mrand.Rand, log *logx.Logger) []*proto.PeerInfo {
+	if len(all) == 0 {
+		return ordered
+	}
+	// costruisci set degli ID già presenti
+	seen := map[string]struct{}{}
+	for _, p := range ordered {
+		if p != nil {
+			seen[p.NodeId] = struct{}{}
+		}
+	}
+	// raccogli candidati non presenti
+	pool := make([]*proto.PeerInfo, 0, len(all))
+	for _, p := range all {
+		if p == nil {
+			continue
+		}
+		if _, ok := seen[p.NodeId]; !ok {
+			pool = append(pool, p)
+		}
+	}
+	if len(pool) == 0 {
+		// se non c’è nessuno “nuovo”, fai jolly su un esistente per variare l’ordine
+		if len(ordered) > 1 {
+			j := r.Intn(len(ordered))
+			log.Infof("JOLLY → riposiziono candidate=%s addr=%s (pool vuoto)", ordered[j].NodeId, ordered[j].Addr)
+		}
+		return ordered
+	}
+	pick := pool[r.Intn(len(pool))]
+	log.Infof("JOLLY → aggiungo candidate=%s addr=%s (exploration)", pick.NodeId, pick.Addr)
+	return append(ordered, pick)
+}
+
 // ===== StartSeedCoordinator: persona per-nodo + Friends/Reputation =====
 
 func StartSeedCoordinator(
@@ -393,6 +428,35 @@ func StartSeedCoordinator(
 					log.Warnf("COORD: nessun candidato per job=%s; ritento più tardi", job.id)
 					continue
 				}
+				ordered = withJollyCandidate(ordered, peers, r, log)
+				// === JOLLY / EXPLORAZIONE esplicita ===
+				if cfg.Scheduler.JollyPct > 0 && len(ordered) > 0 && len(peers) > len(ordered) {
+					if r.Float64() < cfg.Scheduler.JollyPct {
+						// prendi un peer random che NON è nei top-k
+						inTop := make(map[string]struct{}, len(ordered))
+						for _, p := range ordered {
+							inTop[p.NodeId] = struct{}{}
+						}
+
+						pool := make([]*proto.PeerInfo, 0, len(peers))
+						for _, p := range peers {
+							if p == nil {
+								continue
+							}
+							if _, ok := inTop[p.NodeId]; !ok {
+								pool = append(pool, p)
+							}
+						}
+						if len(pool) > 0 {
+							j := pool[r.Intn(len(pool))]
+							replaced := ordered[len(ordered)-1]
+							ordered[len(ordered)-1] = j
+							log.Infof("JOLLY PICK → replacing last of TopK: replaced=%s  with_random=%s  job=%s",
+								replaced.NodeId, j.NodeId, job.id)
+						}
+					}
+				}
+
 			}
 
 			// 4) Probe/Commit (+ update reputazione)
