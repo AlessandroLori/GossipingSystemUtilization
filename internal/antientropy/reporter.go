@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"GossipSystemUtilization/internal/logx"
@@ -12,8 +13,8 @@ import (
 )
 
 type ReporterConfig struct {
-	PeriodSimS float64 // ogni quanti secondi (tempo SIM) stampare il report
-	TopK       int     // opzionale: quanti nodi più “scarichi” elencare
+	PeriodSimS float64
+	TopK       int
 }
 
 type Reporter struct {
@@ -25,13 +26,14 @@ type Reporter struct {
 	period time.Duration
 	topK   int
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func NewReporter(log *logx.Logger, clk *simclock.Clock, store *Store, selfSampler func() *proto.Stats, cfg ReporterConfig) *Reporter {
 	period := time.Duration(cfg.PeriodSimS * float64(time.Second))
 	if period <= 0 {
-		period = 10 * time.Second // default prudente (tempo SIM)
+		period = 10 * time.Second
 	}
 	topK := cfg.TopK
 	if topK <= 0 {
@@ -48,8 +50,23 @@ func NewReporter(log *logx.Logger, clk *simclock.Clock, store *Store, selfSample
 	}
 }
 
-func (r *Reporter) Start() { go r.loop() }
-func (r *Reporter) Stop()  { close(r.stopCh) }
+func (r *Reporter) Start() {
+	// re-init per riavvii post leave/recovery
+	r.stopOnce = sync.Once{}
+	r.stopCh = make(chan struct{})
+	go r.loop()
+}
+
+func (r *Reporter) Stop() {
+	r.stopOnce.Do(func() {
+		if r.stopCh != nil {
+			close(r.stopCh)
+		}
+		if r.log != nil {
+			r.log.Warnf("Reporter stopped")
+		}
+	})
+}
 
 func (r *Reporter) loop() {
 	for {
@@ -64,13 +81,11 @@ func (r *Reporter) loop() {
 }
 
 func (r *Reporter) printSummary() {
-	// Prendiamo "tutti" usando un max alto: per i nostri cluster piccoli è equivalente a snapshot completo
 	var self *proto.Stats
 	if r.selfSampler != nil {
 		self = r.selfSampler()
 	}
 	stats := r.store.SnapshotSample(10000, self)
-
 	if len(stats) == 0 {
 		return
 	}
@@ -83,7 +98,6 @@ func (r *Reporter) printSummary() {
 	)
 
 	for _, s := range stats {
-		// Medie + minimi CPU/MEM (sempre definiti)
 		sumCPU += s.CpuPct
 		sumMEM += s.MemPct
 		nCPU++
@@ -94,7 +108,6 @@ func (r *Reporter) printSummary() {
 		if s.MemPct < minMEMPct {
 			minMEMPct, minMEMID = s.MemPct, s.NodeId
 		}
-		// GPU: escludi assenti (gpu=-1)
 		if s.GpuPct >= 0 {
 			sumGPU += s.GpuPct
 			nGPU++
@@ -116,7 +129,6 @@ func (r *Reporter) printSummary() {
 			len(stats), avgCPU, avgMEM, minCPUID, minCPUPct, minMEMID, minMEMPct)
 	}
 
-	// Elenco opzionale dei Top-K più "scarichi" per CPU (percentuale più bassa)
 	type kv struct {
 		id string
 		v  float64
@@ -139,5 +151,4 @@ func (r *Reporter) printSummary() {
 	}
 }
 
-// piccola helper per formattazioni inline
 func sprintf(format string, a ...any) string { return fmt.Sprintf(format, a...) }

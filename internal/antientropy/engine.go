@@ -1,12 +1,11 @@
-// internal/antientropy/engine.go
 package antientropy
 
 import (
 	"context"
 	"math/rand"
+	"sync"
 	"time"
 
-	// "GossipSystemUtilization/internal/grpcserver" // Rimuovi questo import
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
@@ -17,12 +16,11 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// ... (Config, e la struct Engine rimangono uguali) ...
 type Config struct {
-	PeriodSimS float64 // intervallo gossip (SIM)
-	Fanout     int     // quanti peer contattare per round
-	SampleSize int     // quante righe inviare
-	TtlSimS    float64 // TTL (SIM) delle entry ricevute
+	PeriodSimS float64
+	Fanout     int
+	SampleSize int
+	TtlSimS    float64
 }
 
 type Engine struct {
@@ -41,7 +39,8 @@ type Engine struct {
 	fanout     int
 	sampleSize int
 
-	stopCh chan struct{}
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 func NewEngine(log *logx.Logger, clk *simclock.Clock, rnd *rand.Rand,
@@ -77,15 +76,29 @@ func NewEngine(log *logx.Logger, clk *simclock.Clock, rnd *rand.Rand,
 	}
 }
 
-// ... (Start, Stop, LocalSample, loopExchange rimangono uguali) ...
 func (e *Engine) Start() {
+	// re-init per riavvii post leave/recovery
+	e.stopOnce = sync.Once{}
+	e.stopCh = make(chan struct{})
 	go e.loopExchange()
 	go e.loopAging()
 }
-func (e *Engine) Stop() { close(e.stopCh) }
+
+func (e *Engine) Stop() {
+	e.stopOnce.Do(func() {
+		if e.stopCh != nil {
+			close(e.stopCh)
+		}
+		if e.log != nil {
+			e.log.Warnf("Anti-Entropy engine stopped")
+		}
+	})
+}
+
 func (e *Engine) LocalSample(max int) []*proto.Stats {
 	return e.store.SnapshotSample(max, e.selfSampler())
 }
+
 func (e *Engine) loopExchange() {
 	for {
 		select {
@@ -120,7 +133,7 @@ func (e *Engine) exchangeWith(addr string, req *proto.AvailBatch) {
 	conn, err := grpc.DialContext(ctx, addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithBlock(),
-		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(e.pbq)), // Aggiungiamo l'interceptor qui
+		grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(e.pbq)),
 	)
 	if err != nil {
 		return
@@ -140,7 +153,6 @@ func (e *Engine) exchangeWith(addr string, req *proto.AvailBatch) {
 	}
 }
 
-// ... (loopAging rimane uguale) ...
 func (e *Engine) loopAging() {
 	period := e.period
 	if period < 500*time.Millisecond {

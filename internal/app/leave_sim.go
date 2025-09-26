@@ -66,7 +66,6 @@ func StartLeaveRecoveryWithRuntime(
 				}
 				x -= v
 			}
-			// fallback: un qualunque k
 			for k := range m {
 				return k
 			}
@@ -74,12 +73,12 @@ func StartLeaveRecoveryWithRuntime(
 		}
 
 		for {
-			// 1) Quanto spesso (sim time): scegli frequenza
+			// 1) Quando scatta la leave (tempo simulato)
 			freqClass := pickKey(in.FrequencyClassWeights) // none/low/medium/high
 			ratePerMin := in.FrequencyPerMinSim[freqClass]
 			waitSim := 999999.0
 			if ratePerMin > 0 {
-				minutes := r.ExpFloat64() / ratePerMin // Exp(rate)
+				minutes := r.ExpFloat64() / ratePerMin
 				waitSim = minutes * 60.0
 			}
 			if waitSim > 1e8 { // “none”
@@ -87,7 +86,7 @@ func StartLeaveRecoveryWithRuntime(
 			}
 			clock.SleepSim(time.Duration(waitSim * float64(time.Second)))
 
-			// 2) Quanto dura la leave
+			// 2) Quanto dura
 			durClass := pickKey(in.DurationClassWeights) // short/medium/long
 			meanS := in.DurationMeanSimS[durClass]
 			if meanS <= 0 {
@@ -96,10 +95,11 @@ func StartLeaveRecoveryWithRuntime(
 			durS := meanS * (0.7 + 0.6*r.Float64()) // 0.7–1.3 × mean
 			dur := time.Duration(durS * float64(time.Second))
 
-			// 3) ANNUNCIO: imposta BusyUntil & LeaveUntil nel piggyback e “tocca” alcuni vicini
+			// 3) Imposta Busy+Leave e FORZA subito un self-advert aggiornato
 			if rt.PBQueue != nil {
-				rt.PBQueue.SetBusyFor(dur)  // farà comparire busy nel prossimo piggyback
-				rt.PBQueue.SetLeaveFor(dur) // segnale esplicito di leave
+				rt.PBQueue.SetBusyFor(dur)
+				rt.PBQueue.SetLeaveFor(dur)
+				forceSelfAdvertLeave(rt, clock, selfID, dur)
 			}
 			announceLeaveToNeighbors(log, clock, r, rt, selfID, dur)
 
@@ -120,20 +120,53 @@ func StartLeaveRecoveryWithRuntime(
 			if err := rt.StartAll(); err != nil {
 				log.Errorf("LEAVE restart error: %v", err)
 			}
-			// cancella il flag di leave per i nuovi piggyback
+			// cancella i flag di leave/busy per i nuovi piggyback e pubblica stato “clean”
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetLeaveFor(0)
+				rt.PBQueue.SetBusyFor(0)
+				forceSelfAdvertLeave(rt, clock, selfID, 0)
 			}
 			rt.TryJoinIfNeeded()
 		}
 	}()
 }
 
+// forceSelfAdvertLeave: duplica l’ultimo self-advert, aggiorna busy/leave e timestamp, e lo rimette in coda
+func forceSelfAdvertLeave(rt *Runtime, clock *simclock.Clock, selfID string, d time.Duration) {
+	if rt == nil || rt.PBQueue == nil || clock == nil || selfID == "" {
+		return
+	}
+	nowMs := clock.NowSim().UnixMilli()
+
+	// base: prova a prendere l’ultimo advert locale
+	a, ok := rt.PBQueue.Latest(selfID)
+	if !ok {
+		// fallback minimale
+		a = piggyback.Advert{
+			NodeId: selfID,
+			Avail:  224, // “alta” disponibilità di default
+		}
+	}
+	ttlMs := int64(110000) // allinea al TTL di default della queue (110s)
+	if a.ExpireMs > a.CreateMs {
+		ttlMs = a.ExpireMs - a.CreateMs
+	}
+	a.CreateMs = nowMs
+	a.ExpireMs = nowMs + ttlMs
+	if d > 0 {
+		a.BusyUntilMs = nowMs + d.Milliseconds()
+		a.LeaveUntilMs = a.BusyUntilMs
+	} else {
+		a.BusyUntilMs = 0
+		a.LeaveUntilMs = 0
+	}
+	rt.PBQueue.Upsert(a)
+}
+
 func announceLeaveToNeighbors(log *logx.Logger, clock *simclock.Clock, r *rand.Rand, rt *Runtime, selfID string, dur time.Duration) {
 	if rt == nil || rt.Registry == nil {
 		return
 	}
-	// prova a “pizzicare” fino a 3-6 vicini per veicolare il piggyback (Busy/Leave)
 	peers := rt.Registry.SamplePeers(selfID, 6)
 	if len(peers) == 0 {
 		return
@@ -148,7 +181,6 @@ func announceLeaveToNeighbors(log *logx.Logger, clock *simclock.Clock, r *rand.R
 
 	for i := 0; i < n; i++ {
 		p := peers[r.Intn(len(peers))]
-		// usiamo un Probe “light” per attaccare piggyback via interceptor
 		go func(addr string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()

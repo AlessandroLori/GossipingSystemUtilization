@@ -10,28 +10,24 @@ import (
 
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/simclock"
-
 	proto "GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
 
-// metadata key (stringa Base64 “safe”)
 const mdKey = "x-pb"
 
-// ======= CAMPi Advert (aggiunti HasGPU, BusyUntilMs, LeaveUntilMs) =======
 type Advert struct {
 	NodeId       string
 	Avail        uint8
 	CreateMs     int64
 	ExpireMs     int64
-	HasGPU       bool  // presenza GPU del peer
-	BusyUntilMs  int64 // cool-off (tempo SIM assoluto), 0 se non busy
-	LeaveUntilMs int64 // leave “graceful” (tempo SIM assoluto), 0 se non in leave
+	HasGPU       bool
+	BusyUntilMs  int64
+	LeaveUntilMs int64
 }
 
-// ======= Queue =======
 type Queue struct {
 	log   *logx.Logger
 	clock *simclock.Clock
@@ -39,10 +35,10 @@ type Queue struct {
 	mu   sync.Mutex
 	max  int
 	ttl  time.Duration
-	data map[string]Advert // per-node: manteniamo il più recente
+	data map[string]Advert
 
-	selfBusyUntilMs  int64 // protetto da mu
-	selfLeaveUntilMs int64 // protetto da mu
+	selfBusyUntilMs  int64
+	selfLeaveUntilMs int64
 }
 
 func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duration) *Queue {
@@ -61,9 +57,6 @@ func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duratio
 	}
 }
 
-// ======= Helper Cool-off / Leave / Fresh =======
-
-// SetBusyFor imposta un cool-off (tempo SIM) per il nodo locale.
 func (q *Queue) SetBusyFor(d time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -77,7 +70,6 @@ func (q *Queue) SetBusyFor(d time.Duration) {
 	q.log.Infof("ANTI-HERD COOLOFF(local) → busy for %v (until=%d)", d, q.selfBusyUntilMs)
 }
 
-// SetLeaveFor imposta la finestra di “leave” (tempo SIM) per il nodo locale.
 func (q *Queue) SetLeaveFor(d time.Duration) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -96,14 +88,12 @@ func (q *Queue) getSelfBusyUntilMs() int64 {
 	defer q.mu.Unlock()
 	return q.selfBusyUntilMs
 }
-
 func (q *Queue) getSelfLeaveUntilMs() int64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return q.selfLeaveUntilMs
 }
 
-// Latest ritorna l'ultimo Advert noto per nodeId.
 func (q *Queue) Latest(nodeId string) (Advert, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -111,7 +101,6 @@ func (q *Queue) Latest(nodeId string) (Advert, bool) {
 	return a, ok
 }
 
-// Fresh dice se il dato piggyback per nodeId è fresco (< staleCutoffMs).
 func (q *Queue) Fresh(nodeId string, nowMs int64, staleCutoffMs int64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -120,14 +109,12 @@ func (q *Queue) Fresh(nodeId string, nowMs int64, staleCutoffMs int64) bool {
 		return false
 	}
 	if staleCutoffMs <= 0 {
-		// fallback: usa TTL residua
 		return a.ExpireMs > nowMs
 	}
 	age := nowMs - a.CreateMs
 	return age >= 0 && age <= staleCutoffMs
 }
 
-// BusyPenalty restituisce 1 se il peer è in cool-off, altrimenti 0.
 func (q *Queue) BusyPenalty(nodeId string, nowMs int64) float64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -138,8 +125,6 @@ func (q *Queue) BusyPenalty(nodeId string, nowMs int64) float64 {
 	return 1.0
 }
 
-// ======= Upsert / TakeForSend =======
-
 func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if s == nil || s.NodeId == "" {
 		return
@@ -149,7 +134,6 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if nowMs == 0 {
 		nowMs = q.clock.NowSim().UnixMilli()
 	}
-	// Legge busy/leave attuali dell'istanza locale
 	busy := q.getSelfBusyUntilMs()
 	leave := q.getSelfLeaveUntilMs()
 
@@ -213,7 +197,6 @@ func (q *Queue) TakeForSend(n int) []Advert {
 			buf = append(buf, a)
 		}
 	}
-	// insertion-sort by avail/create/expire (stesso ordine che avevi)
 	for i := 1; i < len(buf); i++ {
 		j := i
 		for j > 0 {
@@ -240,8 +223,6 @@ func better(a, b Advert) bool {
 	}
 	return a.ExpireMs > b.ExpireMs
 }
-
-// ======= Interceptors gRPC con piggyback =======
 
 func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 	return func(
@@ -295,11 +276,13 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 						)
 					}
 					q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
+
 					for _, a := range arr {
-						// Log dedicato “ha lasciato”
-						if a.LeaveUntilMs > nowMs {
+						// NOTICE solo su transizione: prev non in leave → ora in leave
+						prev, okPrev := q.Latest(a.NodeId)
+						if a.LeaveUntilMs > nowMs && (!okPrev || prev.LeaveUntilMs <= nowMs) {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
-							q.log.Infof("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
+							q.log.Warnf("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
 						}
 						q.Upsert(a)
 					}
@@ -310,8 +293,6 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 		return resp, err
 	}
 }
-
-// ======= encoding/decoding MD (Base64) =======
 
 func encodeAvail255(s *proto.Stats) uint8 {
 	load := s.CpuPct
@@ -331,7 +312,7 @@ func encodeAvail255(s *proto.Stats) uint8 {
 	return v
 }
 
-// layout: | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) | leave_until(8) |
+// | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) | leave_until(8) |
 func encodeMD(arr []Advert) string {
 	var buf []byte
 	for _, a := range arr {
@@ -362,7 +343,6 @@ func decodeMD(s string) ([]Advert, error) {
 	out := make([]Advert, 0, 3)
 	for len(b) >= 2 {
 		l := int(binary.BigEndian.Uint16(b[0:2]))
-		// minimo richiesto: header + nid + avail + 3x uint64 + flags + 2x uint64
 		if len(b) < 2+l+1+8+8+1+8+8 {
 			break
 		}
@@ -389,7 +369,6 @@ func decodeMD(s string) ([]Advert, error) {
 	return out, nil
 }
 
-// Lookup2: ritorna (avail, ok, fresh, busyUntilMs) per un peer.
 func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail uint8, ok bool, fresh bool, busyUntilMs int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
