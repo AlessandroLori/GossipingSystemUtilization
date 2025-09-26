@@ -1,5 +1,7 @@
 package main
 
+//TODO peers generano job , job spezzati tra i peer , reporter dettagliati per nodo , anti gregge, un nodo per container , semplificazion id nodi (?)
+
 import (
 	crand "crypto/rand"
 	"encoding/hex"

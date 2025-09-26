@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sync"
 	"time"
 
+	"math/rand"
 	mrand "math/rand"
 
 	"google.golang.org/grpc"
@@ -55,6 +57,13 @@ type nodeJobGenerator struct {
 	// soglie "heavy" effettive dal config (aligned ai bucket large)
 	cpuTh, memTh, gpuTh float64
 }
+
+var (
+	affOnce      sync.Once
+	affMgr       *affinity.Manager
+	affCtx       context.Context
+	affCtxCancel context.CancelFunc
+)
 
 func newNodeJobGeneratorFromPersona(r *mrand.Rand, cfg *config.Config, persona NodePersona) *nodeJobGenerator {
 	if r == nil {
@@ -302,7 +311,7 @@ func StartSeedCoordinator(
 	reg *seed.Registry,
 	selfID string,
 	pbq *piggyback.Queue,
-	persona NodePersona, // ⬅️ nuovo: profilo per-nodo
+	persona NodePersona,
 ) {
 	// 1) Allinea soglie "heavy" ai bucket (se presenti)
 	cTh, mTh, gTh := cfg.EffectiveThresholds()
@@ -521,13 +530,15 @@ func rankCandidatesForJob(
 	aff *affinity.Manager,
 ) []*proto.PeerInfo {
 
+	// 1) Classe primaria del job (usa le soglie già impostate all'avvio)
 	class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
 
+	// 2) Log header (usa schedJob.id, NON proto.JobSpec)
+	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.id, class, len(sampled))
+
+	// 3) Prepara mapping id -> PeerInfo e costruisci i Candidate per lo scoring
 	id2peer := make(map[string]*proto.PeerInfo, len(sampled))
 	cands := make([]affinity.Candidate, 0, len(sampled))
-
-	nowMs := clock.NowSimMs()
-	_ = nowMs
 
 	for _, p := range sampled {
 		if p == nil {
@@ -535,12 +546,24 @@ func rankCandidatesForJob(
 		}
 		id2peer[p.NodeId] = p
 
-		// ==== STUB segnali (neutri finché non leghiamo piggyback/AE/cool-off) ====
-		hasGPU := true
-		advAvail := -1.0
-		fresh := true
-		penalty := 0.0
-		projected := -1.0
+		// Dati minimi per ora (vendor-agnostic): se non hai integrazione AE/PB qui, usa default neutri
+		hasGPU := true    // se vuoi, qui puoi filtrare davvero (da AE) per ClassGPUHeavy
+		advAvail := -1.0  // -1 = "non disponibile" (piggyback non consultato qui)
+		fresh := true     // se usi uno staleness cutoff, metti false quando vecchio
+		projected := -1.0 // -1 = ignoto (AE non consultato qui)
+		penalty := 0.0    // penalità da cool-off (0..1)
+
+		// Se esiste un cool-off globale, trasformalo in una penalità [0..1] (scala 5s → 1.0)
+		if globalCoolOff != nil {
+			rem := globalCoolOff.Remaining(p.Addr)
+			if rem > 0 {
+				sec := rem.Seconds()
+				if sec < 0 {
+					sec = 0
+				}
+				penalty = math.Min(sec/5.0, 1.0)
+			}
+		}
 
 		cands = append(cands, affinity.Candidate{
 			PeerID:          p.NodeId,
@@ -552,19 +575,194 @@ func rankCandidatesForJob(
 		})
 	}
 
+	// 4) Ranking con Friends & Reputation (stampa breakdown P/A/L/Penalty dentro aff.Rank)
 	scored := aff.Rank(class, cands, topK)
-	if len(scored) == 0 {
-		return nil
-	}
+
+	// 5) Ricostruisci la lista di PeerInfo ordinata
 	out := make([]*proto.PeerInfo, 0, len(scored))
-	seen := make(map[string]struct{}, len(scored))
 	for _, sc := range scored {
-		if p := id2peer[sc.PeerID]; p != nil {
-			if _, dup := seen[p.NodeId]; !dup {
-				out = append(out, p)
-				seen[p.NodeId] = struct{}{}
-			}
+		if pi, ok := id2peer[sc.PeerID]; ok {
+			out = append(out, pi)
 		}
 	}
 	return out
+}
+
+// AffinityInit va chiamata una sola volta all'avvio del coordinator (seed).
+// Esempio: all'interno della tua Start() del coordinator, dopo aver creato il clock.
+func AffinityInit(clk *simclock.Clock) {
+	affOnce.Do(func() {
+		cfg := affinity.DefaultConfig()
+		cfg.Verbose = true // stampe dettagliate (Rep, Friends, Rank breakdown)
+
+		affMgr = affinity.NewManager(cfg, rand.New(rand.NewSource(time.Now().UnixNano())), clk)
+		affCtx, affCtxCancel = context.WithCancel(context.Background())
+		affMgr.StartDecayLoop(affCtx)
+		affMgr.StartLogLoop(affCtx, 15*time.Second, func(s string) {
+			fmt.Printf("[Affinity/Telem]\n%s", s)
+		})
+
+		fmt.Printf("[Affinity] init done (HalfLife=%v DecayEvery=%v MaxFriends=%d)\n",
+			cfg.HalfLife, cfg.DecayEvery, cfg.MaxFriendsPerClass)
+	})
+}
+
+/*
+// AffinityShutdown ferma i loop di decay/log quando chiudi il coordinator (opzionale).
+func AffinityShutdown() {
+	if affCtxCancel != nil {
+		affCtxCancel()
+		fmt.Printf("[Affinity] shutdown requested\n")
+	}
+}
+
+// AffinityPickProbeOrder calcola l'ordine dei peer da probare per il job.
+// Input: lista di candidati già arricchiti (HasGPU, Fresh, AdvertAvail, ProjectedLoad, CooldownPenalty).
+// Ritorna: lista di peerID in ordine decrescente di score. Stampa automaticamente il breakdown per peer.
+func AffinityPickProbeOrder(job *proto.JobSpec, cands []affinity.Candidate, topK int) []string {
+	if affMgr == nil {
+		fmt.Printf("[Affinity] WARN: manager nil; ritorno i candidati così come sono (%d)\n", len(cands))
+		out := make([]string, 0, len(cands))
+		for _, c := range cands {
+			out = append(out, c.PeerID)
+		}
+		return out
+	}
+
+	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
+	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.Id, class, len(cands))
+
+	top := affMgr.Rank(class, cands, topK)
+
+	// Converte in sola lista di PeerID per il probe loop.
+	order := make([]string, 0, len(top))
+	for _, sc := range top {
+		order = append(order, sc.PeerID)
+	}
+	return order
+}
+
+// AffinityOnProbe va chiamata dopo la risposta di Probe (accepted/refused).
+func AffinityOnProbe(peer string, job *proto.JobSpec, accepted bool) {
+	if affMgr == nil || job == nil {
+		return
+	}
+	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
+	affMgr.UpdateOnProbe(peer, class, accepted)
+}
+
+// AffinityOnCommit va chiamata all'esito del commit (completed/refused/timeout/cancelled).
+func AffinityOnCommit(peer string, job *proto.JobSpec, outcome affinity.Outcome) {
+	if affMgr == nil || job == nil {
+		return
+	}
+	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
+	affMgr.UpdateOnCommit(peer, class, outcome)
+}
+*/
+
+// ======== COOL-OFF REGISTRY ========
+// Mappa per indirizzo -> scadenza cool-off
+
+type coolOffRegistry struct {
+	mu            sync.Mutex
+	byAddr        map[string]time.Time
+	afterCommit   time.Duration // quando un COMMIT va a buon fine
+	afterRefusal  time.Duration // quando un probe/commit viene rifiutato
+	afterRPCError time.Duration // quando fallisce dial/RPC/timeout
+}
+
+var globalCoolOff *coolOffRegistry
+
+func newCoolOffRegistry(afterCommit, afterRefusal, afterRPCError time.Duration) *coolOffRegistry {
+	return &coolOffRegistry{
+		byAddr:        make(map[string]time.Time),
+		afterCommit:   afterCommit,
+		afterRefusal:  afterRefusal,
+		afterRPCError: afterRPCError,
+	}
+}
+
+func (cr *coolOffRegistry) shouldSkip(addr string, now time.Time) (skip bool, remain time.Duration) {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	until, ok := cr.byAddr[addr]
+	if !ok {
+		return false, 0
+	}
+	if now.Before(until) {
+		return true, until.Sub(now)
+	}
+	// scaduto → rimuovo
+	delete(cr.byAddr, addr)
+	return false, 0
+}
+
+func (cr *coolOffRegistry) markFor(addr string, dur time.Duration) {
+	if dur <= 0 {
+		return
+	}
+	cr.mu.Lock()
+	cr.byAddr[addr] = time.Now().Add(dur)
+	cr.mu.Unlock()
+}
+
+func (cr *coolOffRegistry) OnCommit(addr string)   { cr.markFor(addr, cr.afterCommit) }
+func (cr *coolOffRegistry) OnRefusal(addr string)  { cr.markFor(addr, cr.afterRefusal) }
+func (cr *coolOffRegistry) OnRPCError(addr string) { cr.markFor(addr, cr.afterRPCError) }
+
+func (cr *coolOffRegistry) Remaining(addr string) time.Duration {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if t, ok := cr.byAddr[addr]; ok {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+		delete(cr.byAddr, addr)
+	}
+	return 0
+}
+
+// ======== COOL-OFF HELPERS ========
+// Helper senza toccare le firme delle funzioni esistenti.
+
+func initCoolOffIfNeeded() {
+	if globalCoolOff == nil {
+		// Valori di default "sicuri". Se vuoi, possiamo scalarli con il time_scale.
+		globalCoolOff = newCoolOffRegistry(
+			1500*time.Millisecond, // dopo COMMIT
+			800*time.Millisecond,  // dopo REFUSAL
+			1200*time.Millisecond, // dopo RPC ERROR / TIMEOUT
+		)
+	}
+}
+
+func CoolOffShouldSkip(addr string, log *logx.Logger) bool {
+	initCoolOffIfNeeded()
+	if skip, remain := globalCoolOff.shouldSkip(addr, time.Now()); skip {
+		log.Infof("COORD COOL-OFF → skip addr=%s remain=%s", addr, remain.Truncate(100*time.Millisecond))
+		return true
+	}
+	return false
+}
+
+func CoolOffOnCommit(addr string, log *logx.Logger) {
+	initCoolOffIfNeeded()
+	globalCoolOff.OnCommit(addr)
+	rem := globalCoolOff.Remaining(addr)
+	log.Infof("COORD COOL-OFF ← set after COMMIT addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
+}
+
+func CoolOffOnRefusal(addr string, log *logx.Logger) {
+	initCoolOffIfNeeded()
+	globalCoolOff.OnRefusal(addr)
+	rem := globalCoolOff.Remaining(addr)
+	log.Infof("COORD COOL-OFF ← set after REFUSAL addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
+}
+
+func CoolOffOnRPCError(addr string, log *logx.Logger) {
+	initCoolOffIfNeeded()
+	globalCoolOff.OnRPCError(addr)
+	rem := globalCoolOff.Remaining(addr)
+	log.Infof("COORD COOL-OFF ← set after RPC-ERROR addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
 }

@@ -15,7 +15,7 @@ var cpuHeavyTh = 70.0
 var memHeavyTh = 70.0
 var gpuHeavyTh = 50.0
 
-// SetThresholds consente di allineare le soglie alle config (es. bucket.large_pct)
+// SetThresholds consente di calibrare le soglie da config/persona.
 func SetThresholds(cpu, mem, gpu float64) {
 	if cpu > 0 {
 		cpuHeavyTh = cpu
@@ -28,7 +28,7 @@ func SetThresholds(cpu, mem, gpu float64) {
 	}
 }
 
-// PrimaryClass: usa le soglie correnti
+// PrimaryClass determina la classe dominante del job dato il profilo %.
 func PrimaryClass(cpuPct, memPct, gpuPct float64) JobClass {
 	switch {
 	case gpuPct >= gpuHeavyTh:

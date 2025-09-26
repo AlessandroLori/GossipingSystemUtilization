@@ -1,112 +1,204 @@
 package affinity
 
 import (
+	"fmt"
 	"math"
 	"sync"
+	"time"
 
-	"GossipSystemUtilization/internal/simclock"
+	simclock "GossipSystemUtilization/internal/simclock"
 )
 
-type repEntry struct {
-	Score      float64
-	UpdatedSim int64 // ms SIM
-}
-
+// ReputationTable mantiene score per (classe-di-job, peer) con decadimento temporale.
+// Gli score sono clampati in [minScore, maxScore] e normalizzabili in [0,1] per lo scoring composito.
 type ReputationTable struct {
-	mu    sync.RWMutex
-	table map[JobClass]map[string]*repEntry // class -> peerID -> entry
-	cfg   *Config
-	clk   *simclock.Clock
+	clk *simclock.Clock
+
+	mu        sync.RWMutex
+	score     map[JobClass]map[string]float64 // class -> peer -> raw score
+	lastDecay int64                           // last decay timestamp (SIM, ms)
+
+	halfLifeSec   float64 // half-life in secondi di TEMPO SIMULATO
+	decayEveryMs  int64   // passo di decadimento (SIM, ms)
+	minScore      float64 // clamp minimo
+	maxScore      float64 // clamp massimo
+	verbosePrints bool
 }
 
-func newReputationTable(cfg *Config, clk *simclock.Clock) *ReputationTable {
-	return &ReputationTable{
-		table: map[JobClass]map[string]*repEntry{
-			ClassCPUOnly:  {},
-			ClassGPUHeavy: {},
-			ClassMemHeavy: {},
-			ClassGeneral:  {},
-		},
-		cfg: cfg,
-		clk: clk,
+// NewReputationTable crea una nuova tabella reputazione.
+// Parametri consigliati: halfLifeSec=90, decayEveryMs=5000, minScore=-5, maxScore=10.
+func NewReputationTable(clk *simclock.Clock, halfLifeSec float64, decayEveryMs int64, minScore, maxScore float64, verbose bool) *ReputationTable {
+	if halfLifeSec <= 0 {
+		halfLifeSec = 90
+	}
+	if decayEveryMs <= 0 {
+		decayEveryMs = 5000
+	}
+	if minScore >= maxScore {
+		minScore, maxScore = -5, 10
+	}
+
+	now := nowSimMs(clk)
+
+	rt := &ReputationTable{
+		clk:           clk,
+		score:         make(map[JobClass]map[string]float64, 8),
+		lastDecay:     now,
+		halfLifeSec:   halfLifeSec,
+		decayEveryMs:  decayEveryMs,
+		minScore:      minScore,
+		maxScore:      maxScore,
+		verbosePrints: verbose,
+	}
+	return rt
+}
+
+// ---------- Lettura ----------
+
+// GetRaw ritorna lo score grezzo (clampato) per (classe, peer).
+func (r *ReputationTable) GetRaw(class JobClass, peer string) float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	m := r.ensureClassLocked(class)
+	return clamp(m[peer], r.minScore, r.maxScore)
+}
+
+// GetNorm ritorna lo score normalizzato in [0,1].
+func (r *ReputationTable) GetNorm(class JobClass, peer string) float64 {
+	raw := r.GetRaw(class, peer)
+	// Mappa [min..max] -> [0..1].
+	return (raw - r.minScore) / (r.maxScore - r.minScore)
+}
+
+// SnapshotClass torna la mappa (copia) score della classe (solo per debug/telemetria).
+func (r *ReputationTable) SnapshotClass(class JobClass) map[string]float64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	orig := r.ensureClassLocked(class)
+	out := make(map[string]float64, len(orig))
+	for k, v := range orig {
+		out[k] = v
+	}
+	return out
+}
+
+// ---------- Aggiornamenti (rinforzi/penalità) ----------
+
+// Bump applica un delta allo score (con clamp).
+func (r *ReputationTable) Bump(class JobClass, peer string, delta float64, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	m := r.ensureClassLocked(class)
+	old := clamp(m[peer], r.minScore, r.maxScore)
+	newv := clamp(old+delta, r.minScore, r.maxScore)
+	m[peer] = newv
+
+	if r.verbosePrints {
+		fmt.Printf("[Affinity/Rep] class=%v peer=%s delta=%+.2f reason=%s  |  raw: %.3f -> %.3f (norm=%.3f)\n",
+			class, peer, delta, reason, old, newv, (newv-r.minScore)/(r.maxScore-r.minScore))
 	}
 }
 
-func (t *ReputationTable) get(class JobClass, peer string) float64 {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	if m := t.table[class]; m != nil {
-		if e := m[peer]; e != nil {
-			return e.Score
-		}
-	}
-	return 0
+// Eventi tipici (puoi chiamarli dal seed_coordinator / RPC outcomes)
+func (r *ReputationTable) OnProbeAccept(class JobClass, peer string) {
+	r.Bump(class, peer, +0.5, "probe_accept")
+}
+func (r *ReputationTable) OnProbeRefuse(class JobClass, peer string) {
+	r.Bump(class, peer, -0.5, "probe_refuse")
+}
+func (r *ReputationTable) OnCommitOk(class JobClass, peer string) {
+	r.Bump(class, peer, +2.0, "commit_ok")
+}
+func (r *ReputationTable) OnCommitRefused(class JobClass, peer string) {
+	r.Bump(class, peer, -1.0, "commit_refused")
+}
+func (r *ReputationTable) OnTimeout(class JobClass, peer string) {
+	r.Bump(class, peer, -3.0, "timeout")
+}
+func (r *ReputationTable) OnCancelled(class JobClass, peer string) {
+	r.Bump(class, peer, -1.5, "cancelled")
 }
 
-func (t *ReputationTable) bump(class JobClass, peer string, delta float64) {
-	now := t.clk.NowSimMs()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	m := t.table[class]
-	if m == nil {
-		m = make(map[string]*repEntry)
-		t.table[class] = m
-	}
-	e := m[peer]
-	if e == nil {
-		e = &repEntry{}
-		m[peer] = e
-	}
-	e.Score += delta
-	if e.Score < t.cfg.MinScore {
-		e.Score = t.cfg.MinScore
-	}
-	if e.Score > t.cfg.MaxScore {
-		e.Score = t.cfg.MaxScore
-	}
-	e.UpdatedSim = now
-}
+// ---------- Decadimento ----------
 
-func (t *ReputationTable) DecayAll() {
-	hl := t.cfg.HalfLife
-	if hl <= 0 {
+// DecayAll applica il decadimento esponenziale su tutti gli score in base al
+// tempo SIM trascorso dall’ultima applicazione (half-life).
+func (r *ReputationTable) DecayAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := nowSimMs(r.clk)
+	dtMs := now - r.lastDecay
+	if dtMs <= 0 {
 		return
 	}
-	// fattore di decadimento per "DecayEvery"
-	f := math.Exp(-float64(t.cfg.DecayEvery) / float64(hl))
 
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for _, m := range t.table {
-		for _, e := range m {
-			e.Score *= f
-			if e.Score < t.cfg.MinScore {
-				e.Score = t.cfg.MinScore
+	// Fattore di decadimento: score *= exp(-Δt / halfLife).
+	// halfLife in secondi; dt in ms -> converto.
+	halfLifeMs := r.halfLifeSec * 1000.0
+	f := math.Exp(-float64(dtMs) / halfLifeMs)
+	if f >= 0.999999 { // delta troppo piccolo, salta
+		return
+	}
+
+	for class, mm := range r.score {
+		for peer, v := range mm {
+			nv := clamp(v*f, r.minScore, r.maxScore)
+			if r.verbosePrints && nv != v {
+				fmt.Printf("[Affinity/Rep] decay class=%v peer=%s  %.3f -> %.3f (factor=%.6f)\n", class, peer, v, nv, f)
 			}
-			if e.Score > t.cfg.MaxScore {
-				e.Score = t.cfg.MaxScore
-			}
+			mm[peer] = nv
 		}
 	}
+	r.lastDecay = now
 }
 
-func (t *ReputationTable) UpdateOnProbe(class JobClass, peer string, accepted bool) {
-	if accepted {
-		t.bump(class, peer, +0.5)
-	} else {
-		t.bump(class, peer, -0.5)
+// StartDecayLoop lancia una goroutine che applica il decadimento ogni decayEveryMs (tempo SIM).
+func (r *ReputationTable) StartDecayLoop(stopCh <-chan struct{}) {
+	interval := r.decayEveryMs
+	if interval <= 0 {
+		interval = 5000
 	}
+	go func() {
+		for {
+			select {
+			case <-stopCh:
+				if r.verbosePrints {
+					fmt.Printf("[Affinity/Rep] decay loop: STOP\n")
+				}
+				return
+			default:
+				r.DecayAll()
+				// Usa il clock simulato per dormire in millisecondi.
+				if r.clk != nil {
+					r.clk.SleepSim(time.Duration(interval) * time.Millisecond)
+				} else {
+					time.Sleep(time.Duration(interval) * time.Millisecond)
+				}
+			}
+		}
+	}()
 }
 
-func (t *ReputationTable) UpdateOnCommit(class JobClass, peer string, outcome Outcome) {
-	switch outcome {
-	case OutcomeCompleted:
-		t.bump(class, peer, +2.0)
-	case OutcomeRefused:
-		t.bump(class, peer, -1.0)
-	case OutcomeTimeout:
-		t.bump(class, peer, -3.0)
-	case OutcomeCancelled:
-		t.bump(class, peer, -1.5)
+// ---------- Helpers ----------
+
+func (r *ReputationTable) ensureClassLocked(class JobClass) map[string]float64 {
+	m, ok := r.score[class]
+	if !ok {
+		m = make(map[JobClass]map[string]float64, 64)[class] // placeholder to avoid nil; fixed below
+		m = make(map[string]float64, 64)
+		r.score[class] = m
 	}
+	return m
+}
+
+func clamp(x, lo, hi float64) float64 {
+	if x < lo {
+		return lo
+	}
+	if x > hi {
+		return hi
+	}
+	return x
 }
