@@ -233,9 +233,10 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
 				var summary []string
-				for _, ad := range ads {
-					summary = append(summary, fmt.Sprintf("%s(av:%d)", ad.NodeId, ad.Avail))
+				for _, a := range ads {
+					summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU))
 				}
+
 				q.log.Infof("PIGGYBACK SEND → attaching %d adverts: %v", len(ads), summary)
 				// La chiamata a encodeMD ora restituisce una stringa Base64 sicura
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
@@ -255,17 +256,19 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 	) (interface{}, error) {
 		if q != nil {
 			if md, ok := metadata.FromIncomingContext(ctx); ok {
-				for _, v := range md.Get(mdKey) {
-					// La chiamata a decodeMD ora si aspetta una stringa Base64
-					if arr, err := decodeMD(v); err == nil && len(arr) > 0 {
-						var summary []string
-						for _, a := range arr {
-							summary = append(summary, fmt.Sprintf("%s(av:%d)", a.NodeId, a.Avail))
-						}
-						q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
-						for _, a := range arr {
-							q.Upsert(a)
-						}
+				vals := md.Get(mdKey)
+				for _, v := range vals {
+					arr, err := decodeMD(v)
+					if err != nil || len(arr) == 0 {
+						continue
+					}
+					var summary []string
+					for _, a := range arr {
+						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU))
+					}
+					q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
+					for _, a := range arr {
+						q.Upsert(a)
 					}
 				}
 			}
@@ -349,4 +352,26 @@ func decodeMD(s string) ([]Advert, error) {
 		b = b[28+l:]
 	}
 	return out, nil
+}
+
+// Lookup2: ritorna (avail, ok, fresh, busyUntilMs) per un peer.
+// fresh = true se l'advert non è troppo vecchio (<= staleCutoffMs) e non è scaduto.
+func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail uint8, ok bool, fresh bool, busyUntilMs int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	a, ok := q.data[nodeID]
+	if !ok {
+		return 0, false, false, 0
+	}
+	if a.ExpireMs <= nowMs {
+		return a.Avail, true, false, a.BusyUntilMs
+	}
+	if staleCutoffMs > 0 {
+		age := nowMs - a.CreateMs
+		fresh = age >= 0 && age <= staleCutoffMs
+	} else {
+		fresh = true
+	}
+	return a.Avail, true, fresh, a.BusyUntilMs
 }

@@ -26,24 +26,28 @@ type LocalCommitFn func(job jobs.Spec) bool
 // - fresh: true se l’advert è fresco (non scaduto, secondo il tuo piggyback).
 type PBLookup func(nodeID string) (avail uint8, ok bool, fresh bool)
 
+// PBLookup2: come PBLookup ma include busy_until_ms del peer.
+type PBLookup2 func(nodeID string) (avail uint8, ok bool, fresh bool, busyUntilMs int64)
+
 // Parametri dello scheduler (blocco "scheduler" nel config.json).
 type Params struct {
-	Mode             string  // "local" (applica qui) oppure "advisory" (solo log)
-	TopK             int     // quanti candidati considerare (post-ranking)
-	OverprovisionPct float64 // margine di sicurezza (es 5 = 5%)
+	Mode             string
+	TopK             int
+	OverprovisionPct float64
 	PrintDecisions   bool
 
-	// === Opzioni di esplorazione ===
-	// Se SoftmaxTau > 0 usa softmax sampling sui punteggi; altrimenti ε-greedy.
-	ExploreEpsilon float64 // prob. di esplorare (ε-greedy). Es: 0.10
-	SoftmaxTau     float64 // temperatura softmax. Es: 0.20 (più bassa = più "argmax").
+	// Esplorazione
+	ExploreEpsilon float64
+	SoftmaxTau     float64
 
-	// Staleness: quanto vecchie possono essere le Stats per considerarle "fresh".
-	// Usiamo il timestamp TS delle Stats (tempo SIM). Default: 15s.
+	// Freshness (ms, tempo SIM) per fallback quando non c'è piggyback fresh
 	FreshCutoffMs int64
 
-	// Pesi dello score composito (tutti opzionali; se 0 usiamo defaults interni).
+	// Pesi score
 	Weights Weights
+
+	// Peso (0..1+) della penalità se il peer è in cool-off (busy_until futuro)
+	BusyPenalty float64
 }
 
 // Pesi per score = wAvail*Avail + wFresh*Fresh + wGPU*HasGpuOK - wProjected*Projected
@@ -55,11 +59,12 @@ type Weights struct {
 }
 
 type Coordinator struct {
-	log     *logx.Logger
-	clock   *simclock.Clock
-	par     Params
-	sampler CandidateSampler
-	local   LocalCommitFn
+	log       *logx.Logger
+	clock     *simclock.Clock
+	par       Params
+	sampler   CandidateSampler
+	local     LocalCommitFn
+	pbLookup2 PBLookup2
 
 	// (Opzionale) Sorgente piggyback per leggere avail/fresh dell’advert.
 	pbLookup PBLookup
@@ -84,12 +89,21 @@ func NewCoordinator(
 			WProjected: 0.40,
 		}
 	}
+	if par.BusyPenalty < 0 {
+		par.BusyPenalty = 0
+	}
+
 	return &Coordinator{log: log, clock: clock, par: par, sampler: sampler, local: local}
 }
 
 // Con questa puoi iniettare la lettura dal Piggyback senza cambiare la firma del costruttore.
 func (c *Coordinator) WithPBLookup(fn PBLookup) *Coordinator {
 	c.pbLookup = fn
+	return c
+}
+
+func (c *Coordinator) WithPBLookup2(fn PBLookup2) *Coordinator {
+	c.pbLookup2 = fn
 	return c
 }
 
@@ -171,12 +185,13 @@ func d(sec float64) time.Duration { return time.Duration(sec * float64(time.Seco
 type cand struct {
 	s          *proto.Stats
 	score      float64
-	availAE    float64 // 0..1 stimata da Stats (AE)
-	availPB    float64 // 0..1 stimata da Piggyback (se presente)
-	availComb  float64 // combinazione AE/PB
-	freshV     float64 // 0..1 (1 = freschissimo)
-	hasGpuOK   float64 // 1 se (job.GPU==0) o (s.GpuPct>=0), altrimenti 0
-	projectedV float64 // 0..1 carico post-job (più alto = peggio)
+	availAE    float64
+	availPB    float64
+	availComb  float64
+	freshV     float64
+	hasGpuOK   float64
+	projectedV float64
+	penalty    float64 // 0 o 1: peer in cool-off (busy_until > now)
 }
 
 func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, topK int) []cand {
@@ -197,14 +212,21 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 		// Piggyback (opzionale)
 		availPB := -1.0
 		freshPB := false
-		if c.pbLookup != nil {
+		var busyUntil int64
+		if c.pbLookup2 != nil {
+			if av255, ok, fresh, busy := c.pbLookup2(s.NodeId); ok {
+				availPB = float64(av255) / 255.0
+				freshPB = fresh
+				busyUntil = busy
+			}
+		} else if c.pbLookup != nil {
 			if av255, ok, fresh := c.pbLookup(s.NodeId); ok {
 				availPB = float64(av255) / 255.0
 				freshPB = fresh
 			}
 		}
 
-		// Freshness: se ho piggyback fresh uso quello; altrimenti età delle Stats.
+		// Freshness: se ho piggyback fresh uso quello; altrimenti età Stats
 		freshV := 0.0
 		if freshPB {
 			freshV = 1.0
@@ -224,7 +246,7 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 			}
 		}
 
-		// HasGPU soddisfatto?
+		// HasGPU
 		hasGpuOK := 1.0
 		if j.GPU > 0 && s.GpuPct < 0 {
 			hasGpuOK = 0.0
@@ -233,16 +255,23 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 		// Carico proiettato post-job (0..1)
 		projectedV := projectedLoadAfterJob(s, j)
 
-		// Combina AE/PB: se PB disponibile, media semplice; altrimenti usa AE.
+		// Avail combinata
 		availComb := availAE
 		if availPB >= 0 {
 			availComb = 0.5*availAE + 0.5*availPB
 		}
 
+		// Penalità da cool-off (binary 0/1, scalata da par.BusyPenalty)
+		pen := 0.0
+		if busyUntil > nowMs {
+			pen = 1.0
+		}
+
 		score := c.par.Weights.WAvail*availComb +
 			c.par.Weights.WFresh*freshV +
 			c.par.Weights.WGPU*hasGpuOK -
-			c.par.Weights.WProjected*projectedV
+			c.par.Weights.WProjected*projectedV -
+			c.par.BusyPenalty*pen
 
 		out = append(out, cand{
 			s:          s,
@@ -253,13 +282,11 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 			freshV:     freshV,
 			hasGpuOK:   hasGpuOK,
 			projectedV: projectedV,
+			penalty:    pen,
 		})
 	}
 
-	// Ordina per score desc
 	sort.Slice(out, func(i, k int) bool { return out[i].score > out[k].score })
-
-	// Troncatura TopK
 	if len(out) > topK {
 		out = out[:topK]
 	}
@@ -272,11 +299,10 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 			if s.availPB >= 0 {
 				pbStr = fmt.Sprintf("%.3f", s.availPB)
 			}
-			c.log.Infof("  #%d %s  score=%.4f  availAE=%.3f availPB=%s avail=%.3f fresh=%.2f gpuOK=%.0f proj=%.3f cpu=%.1f mem=%.1f gpu=%.1f",
-				i+1, s.s.NodeId, s.score, s.availAE, pbStr, s.availComb, s.freshV, s.hasGpuOK, s.projectedV, s.s.CpuPct, s.s.MemPct, s.s.GpuPct)
+			c.log.Infof("  #%d %s  score=%.4f  availAE=%.3f availPB=%s avail=%.3f fresh=%.2f gpuOK=%.0f proj=%.3f pen=%.0f  cpu=%.1f mem=%.1f gpu=%.1f",
+				i+1, s.s.NodeId, s.score, s.availAE, pbStr, s.availComb, s.freshV, s.hasGpuOK, s.projectedV, s.penalty, s.s.CpuPct, s.s.MemPct, s.s.GpuPct)
 		}
 	}
-
 	return out
 }
 
