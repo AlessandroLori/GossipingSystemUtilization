@@ -70,10 +70,12 @@ func (q *Queue) SetBusyFor(d time.Duration) {
 	defer q.mu.Unlock()
 	if d <= 0 {
 		q.selfBusyUntilMs = 0
+		q.log.Infof("ANTI-HERD COOLOFF(local) → cleared")
 		return
 	}
 	now := q.clock.NowSim().UnixMilli()
 	q.selfBusyUntilMs = now + d.Milliseconds()
+	q.log.Infof("ANTI-HERD COOLOFF(local) → busy for %v (until=%d)", d, q.selfBusyUntilMs)
 }
 
 // getSelfBusyUntilMs: accesso interno con lock già gestito dal chiamante o safe qui.

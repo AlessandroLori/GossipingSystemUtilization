@@ -321,9 +321,27 @@ func StartSeedCoordinator(
 	affCfg := affinity.DefaultConfig()
 	affCfg.HalfLife = 60 * time.Second
 	affCfg.DecayEvery = 5 * time.Second
-	affCfg.WReputation, affCfg.WPiggyback, affCfg.WLeastLoad, affCfg.WPenalty = 0.5, 0.3, 0.2, 0.4
-	affCfg.Epsilon, affCfg.SoftmaxTemp = 0.10, 0.20
-	affCfg.StaleCutoff = 5 * time.Second
+
+	// === Weights dal JSON ===
+	affCfg.WPiggyback = cfg.FriendsAffinity.WeightAdvert // avail (PB)
+	affCfg.WLeastLoad = cfg.FriendsAffinity.WeightPerf   // (1 - projected)
+	if s := affCfg.WPiggyback + affCfg.WLeastLoad; s > 0 && s < 1 {
+		affCfg.WReputation = 1 - s // il resto lo diamo alla reputazione
+	} else {
+		affCfg.WReputation = 0.5 // fallback robusto
+	}
+	affCfg.WPenalty = cfg.FriendsAffinity.BusyPenalty // peso della penalità busy
+
+	// === Esplorazione dal JSON ===
+	affCfg.Epsilon = cfg.FriendsAffinity.Epsilon
+	affCfg.SoftmaxTemp = cfg.FriendsAffinity.SoftmaxTemp
+
+	// === Freshness (dal JSON, in ms SIM) ===
+	if cfg.FriendsAffinity.StaleCutoffMs > 0 {
+		affCfg.StaleCutoff = time.Duration(cfg.FriendsAffinity.StaleCutoffMs) * time.Millisecond
+	} else {
+		affCfg.StaleCutoff = 5 * time.Second
+	}
 
 	aff := affinity.NewManager(affCfg, r, clock)
 	ctxDecay, cancelDecay := context.WithCancel(context.Background())
@@ -368,7 +386,7 @@ func StartSeedCoordinator(
 				continue
 			}
 
-			ordered := rankCandidatesForJob(clock, job, peers, k, aff)
+			ordered := rankCandidatesForJob(clock, job, peers, k, aff, cfg, pbq)
 			if len(ordered) == 0 {
 				ordered = samplePeers(peers, k, r)
 				if len(ordered) == 0 {
@@ -383,7 +401,21 @@ func StartSeedCoordinator(
 			bestScore := -1.0
 
 			for _, p := range ordered {
+				// Cool-off: salta i peer con cooldown attivo
+				if CoolOffShouldSkip(p.Addr, log) {
+					continue
+				}
+
 				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq)
+				if !ok {
+					if reason == "dial_error" || reason == "rpc_error" {
+						CoolOffOnRPCError(p.Addr, log)
+					} else {
+						CoolOffOnRefusal(p.Addr, log)
+					}
+					log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
+				}
+
 				for _, cls := range classesForUpdate {
 					aff.UpdateOnProbe(p.NodeId, cls, ok)
 				}
@@ -403,14 +435,28 @@ func StartSeedCoordinator(
 				for _, cls := range classesForUpdate {
 					aff.UpdateOnCommit(bestID, cls, affinity.OutcomeCompleted)
 				}
+
+				// COOL-OFF (self, via piggyback): durata in tempo SIM dal JSON
+				if pbq != nil && cfg.FriendsAffinity.CooldownSimMs > 0 {
+					d := time.Duration(cfg.FriendsAffinity.CooldownSimMs) * time.Millisecond
+					pbq.SetBusyFor(d)
+					log.Infof("COOL-OFF (self) → advertise busy +%s after COMMIT target=%s", d, bestID)
+				}
+				// Cool-off locale sull’indirizzo target (usato per lo skip real-time)
+				CoolOffOnCommit(bestAddr, log)
+
 				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
+
 			} else {
 				for _, cls := range classesForUpdate {
 					aff.UpdateOnCommit(bestID, cls, affinity.OutcomeRefused)
 				}
+				// Se il commit fallisce, trattiamolo come errore RPC → cool-off
+				CoolOffOnRPCError(bestAddr, log)
 				log.Warnf("COORD COMMIT ✖ target=%s job=%s", bestID, job.id)
 			}
+
 		}
 	}()
 }
@@ -528,6 +574,8 @@ func rankCandidatesForJob(
 	sampled []*proto.PeerInfo,
 	topK int,
 	aff *affinity.Manager,
+	cfg *config.Config,
+	pbq *piggyback.Queue,
 ) []*proto.PeerInfo {
 
 	// 1) Classe primaria del job (usa le soglie già impostate all'avvio)
@@ -537,6 +585,8 @@ func rankCandidatesForJob(
 	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.id, class, len(sampled))
 
 	// 3) Prepara mapping id -> PeerInfo e costruisci i Candidate per lo scoring
+	nowMs := clock.NowSim().UnixMilli()
+
 	id2peer := make(map[string]*proto.PeerInfo, len(sampled))
 	cands := make([]affinity.Candidate, 0, len(sampled))
 
@@ -546,22 +596,22 @@ func rankCandidatesForJob(
 		}
 		id2peer[p.NodeId] = p
 
-		// Dati minimi per ora (vendor-agnostic): se non hai integrazione AE/PB qui, usa default neutri
-		hasGPU := true    // se vuoi, qui puoi filtrare davvero (da AE) per ClassGPUHeavy
-		advAvail := -1.0  // -1 = "non disponibile" (piggyback non consultato qui)
-		fresh := true     // se usi uno staleness cutoff, metti false quando vecchio
-		projected := -1.0 // -1 = ignoto (AE non consultato qui)
-		penalty := 0.0    // penalità da cool-off (0..1)
+		// Defaults neutri
+		hasGPU := true
+		advAvail := -1.0
+		fresh := true
+		penalty := 0.0
+		projected := -1.0 // AE non integrato qui: ignoto
 
-		// Se esiste un cool-off globale, trasformalo in una penalità [0..1] (scala 5s → 1.0)
-		if globalCoolOff != nil {
-			rem := globalCoolOff.Remaining(p.Addr)
-			if rem > 0 {
-				sec := rem.Seconds()
-				if sec < 0 {
-					sec = 0
+		if pbq != nil {
+			av255, ok, freshPB, busyUntil := pbq.Lookup2(p.NodeId, nowMs, cfg.FriendsAffinity.StaleCutoffMs)
+			if ok {
+				advAvail = float64(av255) / 255.0
+				fresh = freshPB
+				if busyUntil > nowMs {
+					// penalità binaria; il peso effettivo lo applica affCfg.WPenalty
+					penalty = 1.0
 				}
-				penalty = math.Min(sec/5.0, 1.0)
 			}
 		}
 

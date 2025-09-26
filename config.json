@@ -76,7 +76,23 @@
   "frequency_per_min_sim":   { "high": 1.2,  "medium": 0.4,  "low": 0.1,  "none": 0.0  },
   "duration_class_weights":  { "grave": 0.15, "medium": 0.50, "small": 0.35 },
   "duration_mean_sim_s":     { "grave": 60,   "medium": 20,   "small": 5   }
+},
+
+"friends_affinity": {
+  "weight_perf":   0.50,
+  "weight_advert": 0.30,
+  "weight_load":   0.20,
+
+  "epsilon": 0.10,
+  "softmax_temp": 0.20,
+
+  "stale_cutoff_ms": 12000,
+  "busy_penalty": 1.0,
+
+  "cooldown_sim_ms": 8000,
+  "topk": 3
 }
+
 
 
 }
