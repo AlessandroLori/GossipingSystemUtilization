@@ -14,10 +14,12 @@ type Config struct {
 	NodePowerClasses NodePowerClasses `json:"node_power_classes"`
 	BackgroundLoad   BackgroundLoad   `json:"background_load"`
 
-	// Nuove sezioni guidate da config.json
 	Workload  Workload  `json:"workload"`
 	Scheduler Scheduler `json:"scheduler"`
 	Faults    Faults    `json:"faults"`
+
+	// ===== NUOVO: pesi/soglie per Friends & Affinity =====
+	FriendsAffinity FriendsAffinity `json:"friends_affinity"`
 }
 
 // ===== Simulation =====
@@ -103,6 +105,28 @@ type RangePct struct {
 type DurationRange struct {
 	MinS float64 `json:"min_s"`
 	MaxS float64 `json:"max_s"`
+}
+
+// ===== Friends & Affinity (pesi/soglie) =====
+type FriendsAffinity struct {
+	// Pesi composizione score (0..1 ciascuno; verranno normalizzati alla somma)
+	WeightPerf   float64 `json:"weight_perf"`   // (1 - projectedLoad)
+	WeightAdvert float64 `json:"weight_advert"` // avail da piggyback 0..1
+	WeightLoad   float64 `json:"weight_load"`   // (1 - currentLoad)
+
+	// Esplorazione
+	Epsilon     float64 `json:"epsilon"`      // ε-greedy (0..1); se >0 ha precedenza
+	SoftmaxTemp float64 `json:"softmax_temp"` // temperatura softmax (>0 per usare softmax)
+
+	// Freshness e penalità
+	StaleCutoffMs int64   `json:"stale_cutoff_ms"` // quanto vecchio può essere un advert per dirsi "fresh"
+	BusyPenalty   float64 `json:"busy_penalty"`    // 0..1: penalità se peer in cool-off
+
+	// Cool-off da applicare ai commit (tempo SIM)
+	CooldownSimMs int64 `json:"cooldown_sim_ms"`
+
+	// TopK candidato per la fase di pick (se 0 → usa Scheduler.ProbeFanout o default locale)
+	TopK int `json:"topk"`
 }
 
 // Usa i bucket (invece dei range) solo se sono TUTTI presenti
@@ -234,6 +258,36 @@ func (c *Config) applyDefaults() {
 	if c.Scheduler.ProbeTimeoutRealMs <= 0 {
 		c.Scheduler.ProbeTimeoutRealMs = 300
 	}
+	// Friends & Affinity defaults
+	if c.FriendsAffinity.WeightPerf == 0 && c.FriendsAffinity.WeightAdvert == 0 && c.FriendsAffinity.WeightLoad == 0 {
+		c.FriendsAffinity.WeightPerf = 0.50
+		c.FriendsAffinity.WeightAdvert = 0.30
+		c.FriendsAffinity.WeightLoad = 0.20
+	}
+	if c.FriendsAffinity.Epsilon < 0 {
+		c.FriendsAffinity.Epsilon = 0
+	}
+	if c.FriendsAffinity.SoftmaxTemp < 0 {
+		c.FriendsAffinity.SoftmaxTemp = 0
+	}
+	if c.FriendsAffinity.StaleCutoffMs <= 0 {
+		c.FriendsAffinity.StaleCutoffMs = 12_000 // 12s SIM
+	}
+	if c.FriendsAffinity.BusyPenalty <= 0 {
+		c.FriendsAffinity.BusyPenalty = 1.0
+	}
+	if c.FriendsAffinity.CooldownSimMs <= 0 {
+		c.FriendsAffinity.CooldownSimMs = 8_000 // 8s SIM di cool-off dopo commit
+	}
+	if c.FriendsAffinity.TopK <= 0 {
+		// fallback: usa probe_fanout se presente, altrimenti 3
+		if c.Scheduler.ProbeFanout > 0 {
+			c.FriendsAffinity.TopK = c.Scheduler.ProbeFanout
+		} else {
+			c.FriendsAffinity.TopK = 3
+		}
+	}
+
 }
 
 // ===== Traduzione Faults → faults.AutoProfileDef =====
