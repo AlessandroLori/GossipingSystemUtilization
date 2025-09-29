@@ -399,6 +399,11 @@ func StartSeedCoordinator(
 		clock.SleepSim(2 * time.Second) // lascia stabilizzare AE/SWIM
 
 		for {
+			// >>> ADD/PAUSE: se il nodo è in leave/fault (servizi fermi), il coordinator dorme e non fa I/O.
+			if !IsNodeUp() {
+				clock.SleepSim(500 * time.Millisecond)
+				continue
+			}
 			// 1) Inter-arrivo secondo il mean del nodo (SIM)
 			waitS := gen.meanS * r.ExpFloat64()
 			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
@@ -577,6 +582,12 @@ func samplePeers(in []*proto.PeerInfo, k int, r *mrand.Rand) []*proto.PeerInfo {
 }
 
 func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, timeoutMs int, pbq *piggyback.Queue) (accept bool, score float64, reason string) {
+	// >>> GUARD: se il nodo è giù (leave/fault), comportati come probe fallito
+	if !IsNodeUp() {
+		return false, 0, "node_down"
+	}
+
+	// --- resto della funzione invariato ---
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -606,6 +617,11 @@ func probeNode(clock *simclock.Clock, addr, requesterID string, job schedJob, ti
 }
 
 func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, pbq *piggyback.Queue) bool {
+	// >>> GUARD: se il nodo è giù (leave/fault), rifiuta subito il commit
+	if !IsNodeUp() {
+		return false
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -621,14 +637,21 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 
 	cli := proto.NewGossipClient(conn)
 
-	_, err = cli.Commit(ctx, &proto.CommitRequest{
+	// CommitRequest ha campi flat (niente Job: ...)
+	req := &proto.CommitRequest{
 		JobId:      job.id,
+		ToNodeId:   "", // opzionale: puoi lasciarlo vuoto; l'RPC va già all'addr del peer target
 		CpuPct:     job.cpu,
 		MemPct:     job.mem,
 		GpuPct:     job.gpu,
 		DurationMs: int64(job.duration / time.Millisecond),
-	})
-	return err == nil
+	}
+
+	rep, err := cli.Commit(ctx, req)
+	if err != nil {
+		return false
+	}
+	return rep.GetOk()
 }
 
 // rankCandidatesForJob ordina i candidati usando Friends & Reputation.

@@ -2,6 +2,7 @@ package app
 
 import (
 	"net"
+	"sync/atomic"
 	"time"
 
 	mrand "math/rand"
@@ -43,6 +44,11 @@ type Runtime struct {
 
 	selfStats func() *proto.Stats
 }
+
+// Stato process-level del nodo: true = servizi attivi; false = in leave/fault (servizi fermi).
+var nodeUp atomic.Bool
+
+func IsNodeUp() bool { return nodeUp.Load() }
 
 func NewRuntime(
 	id, grpcAddr string,
@@ -125,10 +131,17 @@ func (rt *Runtime) StartAll() error {
 		rt.Rng,
 		rt.PBQueue,
 	)
+	nodeUp.Store(true)
+
 	return err
 }
 
 func (rt *Runtime) StopAll() {
+	nodeUp.Store(false)
+	if rt.PBQueue != nil {
+		rt.PBQueue.Pause()
+	}
+
 	grpcserver.Stop(rt.GRPC, rt.Listener, rt.Log)
 	if rt.Reporter != nil {
 		rt.Reporter.Stop()
@@ -149,6 +162,11 @@ func (rt *Runtime) StopAll() {
 }
 
 func (rt *Runtime) RecoverAll() {
+	if rt.PBQueue != nil {
+		rt.PBQueue.Resume()
+	}
+	nodeUp.Store(true)
+
 	swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
 	rt.Mgr = swim.NewManager(rt.ID, rt.GRPCAddr, rt.Log, rt.Clock, rt.Rng, swimCfg)
 	rt.Mgr.Start()
@@ -160,6 +178,8 @@ func (rt *Runtime) RecoverAll() {
 	repCfg := antientropy.ReporterConfig{PeriodSimS: 10.0, TopK: 3}
 	rt.Reporter = antientropy.NewReporter(rt.Log, rt.Clock, rt.Store, rt.selfStats, repCfg)
 	rt.Reporter.Start()
+
+	nodeUp.Store(true)
 
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(

@@ -70,13 +70,23 @@ func (r *Reporter) Stop() {
 
 func (r *Reporter) loop() {
 	for {
+		// Uscita immediata se stoppato
 		select {
 		case <-r.stopCh:
 			return
 		default:
 		}
+
+		// Attendi il periodo simulato
 		r.clk.SleepSim(r.period)
-		r.printSummary()
+
+		// Ricontrolla stop prima di stampare (evita l'ultimo summary dopo Stop)
+		select {
+		case <-r.stopCh:
+			return
+		default:
+			r.printSummary()
+		}
 	}
 }
 

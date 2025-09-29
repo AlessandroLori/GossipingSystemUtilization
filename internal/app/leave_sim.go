@@ -99,6 +99,7 @@ func StartLeaveRecoveryWithRuntime(
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetBusyFor(dur)
 				rt.PBQueue.SetLeaveFor(dur)
+				rt.PBQueue.Pause()
 				forceSelfAdvertLeave(rt, clock, selfID, dur)
 			}
 			announceLeaveToNeighbors(log, clock, r, rt, selfID, dur)
@@ -125,6 +126,9 @@ func StartLeaveRecoveryWithRuntime(
 				rt.PBQueue.SetLeaveFor(0)
 				rt.PBQueue.SetBusyFor(0)
 				forceSelfAdvertLeave(rt, clock, selfID, 0)
+				rt.PBQueue.Resume()
+				// ping soft di rientro (riusa announceLeave ma con dur=0 o fai una back-announce simile)
+				announceLeaveToNeighbors(log, clock, r, rt, selfID, 250*time.Millisecond)
 			}
 			rt.TryJoinIfNeeded()
 		}

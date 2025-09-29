@@ -18,7 +18,7 @@ type FaultProfileInput struct {
 	DurationMeanSimS      map[string]float64
 }
 
-// Variante “low-ceremony”: prende direttamente la Runtime e crea gli hook.
+// Avvio fault-sim con accesso al Runtime (stop/recover servizi)
 func StartFaultRecoveryWithRuntime(
 	log *logx.Logger,
 	clock *simclock.Clock,
@@ -29,17 +29,29 @@ func StartFaultRecoveryWithRuntime(
 	hooks := faults.Hooks{
 		OnDown: func() {
 			log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
+			// nodeUp=false viene impostato da StopAll()
 			rt.StopAll()
 		},
 		OnUp: func() {
 			log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
+			// nodeUp=true viene impostato da RecoverAll()
 			rt.RecoverAll()
+
+			// Annuncio immediato di recovery: pulisci leave e forza self-advert 'clean'
+			if rt != nil && rt.PBQueue != nil {
+				rt.PBQueue.SetLeaveFor(0)
+				// Usa l'helper già definito in leave_sim.go
+				forceSelfAdvertLeave(rt, rt.Clock, rt.ID, 0)
+			}
+
+			// Riallinea membership se necessario (utile sui peer non-seed)
+			rt.TryJoinIfNeeded()
 		},
 	}
 	StartFaultRecovery(log, clock, r, in, hooks)
 }
 
-// Versione “generica” usata internamente, ma disponibile se servisse.
+// Versione generica riutilizzabile con Hooks esterni
 func StartFaultRecovery(
 	log *logx.Logger,
 	clock *simclock.Clock,
@@ -47,6 +59,7 @@ func StartFaultRecovery(
 	in FaultProfileInput,
 	hooks faults.Hooks,
 ) {
+	// utility per i default dei puntatori bool
 	boolv := func(p *bool, def bool) bool {
 		if p != nil {
 			return *p
@@ -54,14 +67,8 @@ func StartFaultRecovery(
 		return def
 	}
 
-	fdef := struct {
-		Enabled               bool
-		PrintTransitions      bool
-		FrequencyClassWeights map[string]float64
-		FrequencyPerMinSim    map[string]float64
-		DurationClassWeights  map[string]float64
-		DurationMeanSimS      map[string]float64
-	}{
+	// Mappa input → profilo automatico del package faults
+	fdef := faults.AutoProfileDef{
 		Enabled:               boolv(in.Enabled, false),
 		PrintTransitions:      boolv(in.PrintTransitions, false),
 		FrequencyClassWeights: in.FrequencyClassWeights,

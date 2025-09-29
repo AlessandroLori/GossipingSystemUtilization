@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"GossipSystemUtilization/internal/logx"
@@ -13,7 +14,9 @@ import (
 	proto "GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const mdKey = "x-pb"
@@ -39,6 +42,7 @@ type Queue struct {
 
 	selfBusyUntilMs  int64
 	selfLeaveUntilMs int64
+	paused           int32
 }
 
 func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duration) *Queue {
@@ -129,6 +133,11 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if s == nil || s.NodeId == "" {
 		return
 	}
+
+	if q.IsPaused() {
+		return // niente rumore mentre siamo in pausa
+	}
+
 	avail := encodeAvail255(s)
 	nowMs := s.TsMs
 	if nowMs == 0 {
@@ -233,6 +242,12 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
+		// Se siamo in pausa (leave/fault), BLOCCA le RPC in uscita.
+		if q != nil && q.IsPaused() {
+			return status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
+		}
+
+		// Altrimenti, allega piggyback come prima.
 		if q != nil {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
@@ -247,8 +262,7 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
 			}
 		}
-		err := invoker(ctx, method, req, reply, cc, opts...)
-		return err
+		return invoker(ctx, method, req, reply, cc, opts...)
 	}
 }
 
@@ -258,7 +272,12 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 		req interface{},
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
+
 	) (interface{}, error) {
+
+		if q != nil && q.IsPaused() {
+			return nil, status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
+		}
 		if q != nil {
 			if md, ok := metadata.FromIncomingContext(ctx); ok {
 				vals := md.Get(mdKey)
@@ -270,27 +289,20 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					var summary []string
 					nowMs := q.clock.NowSim().UnixMilli()
 					for _, a := range arr {
-						summary = append(summary,
-							fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
-								a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
-						)
+						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU))
 					}
 					q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
-
 					for _, a := range arr {
-						// NOTICE solo su transizione: prev non in leave → ora in leave
-						prev, okPrev := q.Latest(a.NodeId)
-						if a.LeaveUntilMs > nowMs && (!okPrev || prev.LeaveUntilMs <= nowMs) {
+						if a.LeaveUntilMs > nowMs {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
-							q.log.Warnf("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
+							q.log.Infof("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
 						}
 						q.Upsert(a)
 					}
 				}
 			}
 		}
-		resp, err := handler(ctx, req)
-		return resp, err
+		return handler(ctx, req)
 	}
 }
 
@@ -388,3 +400,8 @@ func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail 
 	}
 	return a.Avail, true, fresh, a.BusyUntilMs
 }
+
+// Pause/Resume del traffico piggyback (usati da leave/fault)
+func (q *Queue) Pause()         { atomic.StoreInt32(&q.paused, 1) }
+func (q *Queue) Resume()        { atomic.StoreInt32(&q.paused, 0) }
+func (q *Queue) IsPaused() bool { return atomic.LoadInt32(&q.paused) == 1 }
