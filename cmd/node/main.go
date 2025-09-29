@@ -1,6 +1,6 @@
 package main
 
-//TODO meccanismo di leave volontario, peers generano job, job mandati anche random per scoprire rete, seed eseguono i job inviati dai peer come i peer stessi
+//TODO peers generano job, job mandati anche random per scoprire rete, seed eseguono i job inviati dai peer come i peer stessi
 // , reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
 
 import (
@@ -291,7 +291,7 @@ func main() {
 		}
 
 		// Lo stesso coordinator gira sia su seed che su peer
-		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, id, rt.PBQueue, persona)
+		app.StartSeedCoordinator(log, clock, r, cfg, rt.Registry, rt.Mgr, id, rt.PBQueue, persona)
 
 		// === Leave-sim (Graceful leave & recovery) ===
 		app.StartLeaveRecoveryWithRuntime(
