@@ -242,12 +242,12 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		// Se siamo in pausa (leave/fault), BLOCCA le RPC in uscita.
+		// Se la coda è in pausa (leave/fault), non inviare proprio l'RPC.
 		if q != nil && q.IsPaused() {
 			return status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
 		}
 
-		// Altrimenti, allega piggyback come prima.
+		// Altrimenti, allega gli adverts (come prima)
 		if q != nil {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {

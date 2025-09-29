@@ -348,11 +348,11 @@ func StartSeedCoordinator(
 	pbq *piggyback.Queue,
 	persona NodePersona,
 ) {
-	// 1) Allinea soglie "heavy" ai bucket (se presenti)
+	// 1) Soglie "heavy" dai bucket (se presenti)
 	cTh, mTh, gTh := cfg.EffectiveThresholds()
 	affinity.SetThresholds(cTh, mTh, gTh)
 
-	// 2) Friends & Reputation: init + decay + log periodico
+	// 2) Friends & Reputation: init + loop di decay/log (API del package affinity reale)
 	affCfg := affinity.DefaultConfig()
 	affCfg.HalfLife = 60 * time.Second
 	affCfg.DecayEvery = 5 * time.Second
@@ -361,54 +361,48 @@ func StartSeedCoordinator(
 	affCfg.WPiggyback = cfg.FriendsAffinity.WeightAdvert // avail (PB)
 	affCfg.WLeastLoad = cfg.FriendsAffinity.WeightPerf   // (1 - projected)
 	if s := affCfg.WPiggyback + affCfg.WLeastLoad; s > 0 && s < 1 {
-		affCfg.WReputation = 1 - s // il resto lo diamo alla reputazione
+		affCfg.WReputation = 1 - s
 	} else {
-		affCfg.WReputation = 0.5 // fallback robusto
+		affCfg.WReputation = 0.5
 	}
-	affCfg.WPenalty = cfg.FriendsAffinity.BusyPenalty // peso della penalità busy
+	affCfg.WPenalty = cfg.FriendsAffinity.BusyPenalty
 
-	// === Esplorazione dal JSON ===
-	affCfg.Epsilon = cfg.FriendsAffinity.Epsilon
-	affCfg.SoftmaxTemp = cfg.FriendsAffinity.SoftmaxTemp
+	// Costruisci il manager di affinity con l’API reale (NewManager), non esiste affinity.New(...)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	aff := affinity.NewManager(affCfg, rng, clock)
 
-	// === Freshness (dal JSON, in ms SIM) ===
-	if cfg.FriendsAffinity.StaleCutoffMs > 0 {
-		affCfg.StaleCutoff = time.Duration(cfg.FriendsAffinity.StaleCutoffMs) * time.Millisecond
-	} else {
-		affCfg.StaleCutoff = 5 * time.Second
-	}
+	// Avvia decay & log periodico (Start*Loop usa context)
+	ctx, cancel := context.WithCancel(context.Background())
+	aff.StartDecayLoop(ctx)
+	aff.StartLogLoop(ctx, 20*time.Second, func(s string) {
+		fmt.Printf("%s", s) // il manager produce già un dump leggibile
+	})
 
-	aff := affinity.NewManager(affCfg, r, clock)
-	ctxDecay, cancelDecay := context.WithCancel(context.Background())
-	go aff.StartDecayLoop(ctxDecay)
-	aff.StartLogLoop(ctxDecay, 12*time.Second, func(s string) { log.Infof("AFFINITY\n%s", s) })
-
-	// 3) Stampa (una volta) la mix di generazione e le soglie
-	//logWorkloadMixOnce(log, cfg, cTh, mTh, gTh)
-
-	// 4) Generatore per-nodo e LOG della persona
+	// 3) Generatore per-nodo (usa la funzione reale newNodeJobGeneratorFromPersona)
 	gen := newNodeJobGeneratorFromPersona(r, cfg, persona)
-	log.Infof("NODE JOB GEN PERSONA → primary=%s dominance=%.2f mix={GEN=%.2f CPU=%.2f MEM=%.2f GPU=%.2f} rate=%s(×%.2f) mean_interarrival_sim_s=%.2f",
-		className(persona.Primary), persona.Dominance,
-		gen.classP[0], gen.classP[1], gen.classP[2], gen.classP[3],
+	logWorkloadMixOnce(log, cfg, cTh, mTh, gTh)
+	log.Infof("Coordinator attivo: persona=%s  mix=%.2f/%.2f/%.2f/%.2f  rate=%s*x%.2f  mean_interarrival=%.1fs",
+		className(persona.Primary), persona.Mix[0], persona.Mix[1], persona.Mix[2], persona.Mix[3],
 		persona.RateLabel, persona.RateFactor, gen.meanS,
 	)
 
+	// === MAIN LOOP ===
 	go func() {
-		defer cancelDecay()
+		defer cancel()
 		clock.SleepSim(2 * time.Second) // lascia stabilizzare AE/SWIM
 
 		for {
-			// >>> ADD/PAUSE: se il nodo è in leave/fault (servizi fermi), il coordinator dorme e non fa I/O.
+			// Pausa dura in leave/fault
 			if !IsNodeUp() {
 				clock.SleepSim(500 * time.Millisecond)
 				continue
 			}
-			// 1) Inter-arrivo secondo il mean del nodo (SIM)
+
+			// 1) Inter-arrivo (SIM)
 			waitS := gen.meanS * r.ExpFloat64()
 			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
 
-			// 2) Disegna job secondo classe del nodo
+			// 2) Disegna job
 			job := gen.drawJob()
 
 			// 3) Candidati
@@ -422,7 +416,9 @@ func StartSeedCoordinator(
 				peers = reg.SamplePeers(selfID, candidates)
 			}
 			if len(peers) == 0 {
-				log.Warnf("COORD: nessun peer disponibile per job=%s; ritento più tardi", job.id)
+				if IsNodeUp() {
+					log.Warnf("COORD: nessun peer disponibile per job=%s; ritento più tardi", job.id)
+				}
 				continue
 			}
 
@@ -430,38 +426,12 @@ func StartSeedCoordinator(
 			if len(ordered) == 0 {
 				ordered = samplePeers(peers, k, r)
 				if len(ordered) == 0 {
-					log.Warnf("COORD: nessun candidato per job=%s; ritento più tardi", job.id)
+					if IsNodeUp() {
+						log.Warnf("COORD: nessun candidato per job=%s; ritento più tardi", job.id)
+					}
 					continue
 				}
 				ordered = withJollyCandidate(ordered, peers, r, log)
-				// === JOLLY / EXPLORAZIONE esplicita ===
-				if cfg.Scheduler.JollyPct > 0 && len(ordered) > 0 && len(peers) > len(ordered) {
-					if r.Float64() < cfg.Scheduler.JollyPct {
-						// prendi un peer random che NON è nei top-k
-						inTop := make(map[string]struct{}, len(ordered))
-						for _, p := range ordered {
-							inTop[p.NodeId] = struct{}{}
-						}
-
-						pool := make([]*proto.PeerInfo, 0, len(peers))
-						for _, p := range peers {
-							if p == nil {
-								continue
-							}
-							if _, ok := inTop[p.NodeId]; !ok {
-								pool = append(pool, p)
-							}
-						}
-						if len(pool) > 0 {
-							j := pool[r.Intn(len(pool))]
-							replaced := ordered[len(ordered)-1]
-							ordered[len(ordered)-1] = j
-							log.Infof("JOLLY PICK → replacing last of TopK: replaced=%s  with_random=%s  job=%s",
-								replaced.NodeId, j.NodeId, job.id)
-						}
-					}
-				}
-
 			}
 
 			// 4) Probe/Commit (+ update reputazione)
@@ -470,19 +440,29 @@ func StartSeedCoordinator(
 			bestScore := -1.0
 
 			for _, p := range ordered {
-				// Cool-off: salta i peer con cooldown attivo
+				// Se diventiamo "down" a metà ciclo, interrompi silenziosamente.
+				if !IsNodeUp() {
+					break
+				}
+
+				// Cool-off: chiamala sempre; se down, skippa senza log
 				if CoolOffShouldSkip(p.Addr, log) {
 					continue
 				}
 
 				ok, score, reason := probeNode(clock, p.Addr, selfID, job, cfg.Scheduler.ProbeTimeoutRealMs, pbq)
+
 				if !ok {
+					// Aggiorna cool-off (non logga se down); evita refusi per "node_down" locale
 					if reason == "dial_error" || reason == "rpc_error" {
 						CoolOffOnRPCError(p.Addr, log)
-					} else {
+					} else if reason != "node_down" {
 						CoolOffOnRefusal(p.Addr, log)
 					}
-					log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
+					// Log PROBE solo se siamo up e non è "node_down"
+					if IsNodeUp() && reason != "node_down" {
+						log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
+					}
 				}
 
 				for _, cls := range classesForUpdate {
@@ -491,12 +471,16 @@ func StartSeedCoordinator(
 				if ok && score > bestScore {
 					bestScore, bestAddr, bestID = score, p.Addr, p.NodeId
 				}
-				if !ok {
+				if !ok && IsNodeUp() && reason != "node_down" {
 					log.Infof("PROBE → %s refuse (reason=%s) job=%s", p.NodeId, reason, job.id)
 				}
 			}
+
 			if bestAddr == "" {
-				log.Infof("COORD: nessun peer ha accettato il job=%s", job.id)
+				// niente log quando siamo giù: evita "COORD: nessun peer..."
+				if IsNodeUp() {
+					log.Infof("COORD: nessun peer ha accettato il job=%s", job.id)
+				}
 				continue
 			}
 
@@ -511,21 +495,19 @@ func StartSeedCoordinator(
 					pbq.SetBusyFor(d)
 					log.Infof("COOL-OFF (self) → advertise busy +%s after COMMIT target=%s", d, bestID)
 				}
-				// Cool-off locale sull’indirizzo target (usato per lo skip real-time)
+				// Cool-off locale sull’indirizzo target (skip real-time)
 				CoolOffOnCommit(bestAddr, log)
 
 				log.Infof("COORD COMMIT ✓ target=%s job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 					bestID, job.id, job.cpu, job.mem, job.gpu, job.duration)
-
 			} else {
 				for _, cls := range classesForUpdate {
 					aff.UpdateOnCommit(bestID, cls, affinity.OutcomeRefused)
 				}
-				// Se il commit fallisce, trattiamolo come errore RPC → cool-off
+				// Commit fallito → cool-off RPC
 				CoolOffOnRPCError(bestAddr, log)
 				log.Warnf("COORD COMMIT ✖ target=%s job=%s", bestID, job.id)
 			}
-
 		}
 	}()
 }
@@ -875,6 +857,10 @@ func initCoolOffIfNeeded() {
 }
 
 func CoolOffShouldSkip(addr string, log *logx.Logger) bool {
+	// Se il nodo è giù, non loggare e considera lo skip
+	if !IsNodeUp() {
+		return true
+	}
 	initCoolOffIfNeeded()
 	if skip, remain := globalCoolOff.shouldSkip(addr, time.Now()); skip {
 		log.Infof("COORD COOL-OFF → skip addr=%s remain=%s", addr, remain.Truncate(100*time.Millisecond))
@@ -883,14 +869,10 @@ func CoolOffShouldSkip(addr string, log *logx.Logger) bool {
 	return false
 }
 
-func CoolOffOnCommit(addr string, log *logx.Logger) {
-	initCoolOffIfNeeded()
-	globalCoolOff.OnCommit(addr)
-	rem := globalCoolOff.Remaining(addr)
-	log.Infof("COORD COOL-OFF ← set after COMMIT addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
-}
-
 func CoolOffOnRefusal(addr string, log *logx.Logger) {
+	if !IsNodeUp() {
+		return
+	}
 	initCoolOffIfNeeded()
 	globalCoolOff.OnRefusal(addr)
 	rem := globalCoolOff.Remaining(addr)
@@ -898,8 +880,21 @@ func CoolOffOnRefusal(addr string, log *logx.Logger) {
 }
 
 func CoolOffOnRPCError(addr string, log *logx.Logger) {
+	if !IsNodeUp() {
+		return
+	}
 	initCoolOffIfNeeded()
 	globalCoolOff.OnRPCError(addr)
 	rem := globalCoolOff.Remaining(addr)
 	log.Infof("COORD COOL-OFF ← set after RPC-ERROR addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
+}
+
+func CoolOffOnCommit(addr string, log *logx.Logger) {
+	if !IsNodeUp() {
+		return
+	}
+	initCoolOffIfNeeded()
+	globalCoolOff.OnCommit(addr)
+	rem := globalCoolOff.Remaining(addr)
+	log.Infof("COORD COOL-OFF ← set after COMMIT addr=%s cooloff=%s", addr, rem.Truncate(100*time.Millisecond))
 }
