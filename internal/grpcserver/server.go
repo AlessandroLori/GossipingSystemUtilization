@@ -5,8 +5,6 @@ import (
 	"math/rand"
 	"net"
 
-	// "time" // <-- non più necessario
-
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/seed"
@@ -17,7 +15,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-// Start avvia il server gRPC e (se seed) crea il Registry locale.
+// Start avvia il server gRPC e crea SEMPRE una Registry locale (seed e peer).
 func Start(
 	isSeed bool,
 	grpcAddr string,
@@ -43,10 +41,9 @@ func Start(
 		),
 	)
 
-	if isSeed {
-		reg = seed.NewRegistry(r)
-		reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: true})
-	}
+	// ➜ REGISTRY: su TUTTI i nodi (seed e peer)
+	reg = seed.NewRegistry(r)
+	reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: isSeed})
 
 	srv := seed.NewServer(
 		isSeed,
@@ -62,17 +59,12 @@ func Start(
 	)
 	proto.RegisterGossipServer(s, srv)
 
-	// Avvia serve
+	// Serve async
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			log.Errorf("gRPC Serve: %v", err)
 		}
 	}()
-
-	// --- BLOCCO DEL TICKER RIMOSSO ---
-	// La logica di auto-aggiornamento periodico è già gestita centralmente
-	// in cmd/node/main.go usando il simclock, che è il modo corretto.
-	// Rimuoviamo questa versione duplicata e basata sul tempo reale per evitare conflitti.
 
 	if isSeed {
 		log.Infof("SEED attivo su %s (Join/Ping/PingReq/ExchangeAvail/Probe/Commit/Cancel)", grpcAddr)

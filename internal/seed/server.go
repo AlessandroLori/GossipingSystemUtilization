@@ -10,9 +10,9 @@ import (
 	"GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
+	//"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/status"
+	//"google.golang.org/grpc/status"
 )
 
 type Sampler func(max int) []*proto.Stats
@@ -60,32 +60,44 @@ func NewServer(
 
 // === JOIN: solo i seed rispondono ===
 func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinReply, error) {
-	if !s.isSeed {
-		return nil, status.Error(codes.Unimplemented, "Join non disponibile su peer non-seed")
-	}
-	ms := req.MyStats
-	s.log.Infof("JOIN ← node_id=%s addr=%s inc=%d cpu=%.1f%% mem=%.1f%% gpu=%.1f%%",
-		req.NodeId, req.Addr, req.Incarnation, ms.CpuPct, ms.MemPct, ms.GpuPct)
-
-	// registry per seed (per dare peers/stats al chiamante)
-	if s.reg != nil {
-		s.reg.UpsertPeer(&proto.PeerInfo{NodeId: req.NodeId, Addr: req.Addr, IsSeed: false})
-		s.reg.UpsertStats(req.MyStats)
+	if req == nil {
+		return &proto.JoinReply{}, nil
 	}
 
-	// membership per SWIM (così il seed pingherà il nuovo peer)
+	// Aggiorna membership SWIM (così comparirà tra gli ALIVE)
 	if s.mgr != nil {
 		s.mgr.AddPeer(req.NodeId, req.Addr)
 	}
 
-	var peers []*proto.PeerInfo
-	var stats []*proto.Stats
+	// ➜ Registry locale: traccia sempre il peer e il suo "ultimo-visto" di Stats
 	if s.reg != nil {
-		peers = s.reg.SamplePeers(req.NodeId, 10)
-		stats = s.reg.SnapshotStats(20)
+		s.reg.UpsertPeer(&proto.PeerInfo{
+			NodeId: req.NodeId,
+			Addr:   req.Addr,
+			// IsSeed non lo sappiamo dal JoinRequest; non è necessario qui
+		})
+		if req.MyStats != nil {
+			s.reg.UpsertStats(req.MyStats)
+		}
 	}
-	s.log.Infof("JOIN → a %s: peers=%d, stats=%d", req.NodeId, len(peers), len(stats))
-	return &proto.JoinReply{Peers: peers, StatsSnapshot: stats}, nil
+
+	// Prepariamo una reply sensata:
+	// - peers: un piccolo campione dalla nostra registry (esclude l'ID del joiner)
+	// - stats_snapshot: qualche Stat recente dal nostro store via sampler
+	var peers []*proto.PeerInfo
+	if s.reg != nil {
+		// sovracampiona un po' e poi lascia che il client tagli se vuole
+		peers = s.reg.SamplePeers(req.NodeId, 32)
+	}
+	var snapshot []*proto.Stats
+	if s.sampler != nil {
+		snapshot = s.sampler(64)
+	}
+
+	return &proto.JoinReply{
+		Peers:         peers,
+		StatsSnapshot: snapshot,
+	}, nil
 }
 
 // === PING: tutti i nodi rispondono ===
@@ -117,12 +129,23 @@ func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto
 }
 
 // === EXCHANGE AVAIL: push-pull semplice ===
-func (s *Server) ExchangeAvail(ctx context.Context, req *proto.AvailBatch) (*proto.AvailBatch, error) {
-	var resp []*proto.Stats
-	if s.sampler != nil {
-		resp = s.sampler(8)
+func (s *Server) ExchangeAvail(ctx context.Context, in *proto.AvailBatch) (*proto.AvailBatch, error) {
+	// ➜ Registry locale: aggiorna "ultimo-visto" delle stats per ogni nodo
+	if s.reg != nil && in != nil {
+		for _, st := range in.Stats {
+			if st != nil {
+				s.reg.UpsertStats(st)
+			}
+		}
 	}
-	return &proto.AvailBatch{Stats: resp}, nil
+
+	// Rispondi con un piccolo snapshot dal nostro store (via sampler),
+	// così l'anti-entropy continua a diffondere informazioni aggiornate.
+	var out []*proto.Stats
+	if s.sampler != nil {
+		out = s.sampler(64)
+	}
+	return &proto.AvailBatch{Stats: out}, nil
 }
 
 func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.ProbeReply, error) {

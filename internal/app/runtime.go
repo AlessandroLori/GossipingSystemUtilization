@@ -105,7 +105,7 @@ func (rt *Runtime) StartAll() error {
 	// Seed dello store con self
 	rt.Store.UpsertBatch([]*proto.Stats{rt.selfStats()})
 
-	// gRPC server
+	// gRPC server (+ Registry locale SEMPRE)
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(
 		rt.IsSeed,
@@ -114,9 +114,7 @@ func (rt *Runtime) StartAll() error {
 		rt.Clock,
 		rt.Mgr,
 		rt.ID,
-		//seed.Sampler(func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) }),
 		seed.Sampler(rt.safeLocalSample),
-
 		func() *proto.Stats {
 			s := rt.Node.CurrentStatsProto()
 			s.TsMs = rt.Clock.NowSim().UnixMilli()
@@ -131,9 +129,37 @@ func (rt *Runtime) StartAll() error {
 		rt.Rng,
 		rt.PBQueue,
 	)
-	nodeUp.Store(true)
+	if err != nil {
+		return err
+	}
 
-	return err
+	// ➜ SYNC PERIODICO: porta i peer ALIVE di SWIM dentro la registry locale (anche sui peer).
+	//    Questo dà sempre candidati al coordinator, anche se la registry del seed non è raggiungibile.
+	go func() {
+		for {
+			if !IsNodeUp() {
+				rt.Clock.SleepSim(500 * time.Millisecond)
+				continue
+			}
+			if rt.Registry != nil && rt.Mgr != nil {
+				ap := rt.Mgr.AlivePeers()
+				for _, p := range ap {
+					if p.ID == "" || p.ID == rt.ID || p.Addr == "" {
+						continue
+					}
+					rt.Registry.UpsertPeer(&proto.PeerInfo{
+						NodeId: p.ID,
+						Addr:   p.Addr,
+						IsSeed: false, // da SWIM non lo sappiamo; non serve ai fini del coordinamento
+					})
+				}
+			}
+			rt.Clock.SleepSim(2 * time.Second)
+		}
+	}()
+
+	nodeUp.Store(true)
+	return nil
 }
 
 func (rt *Runtime) StopAll() {

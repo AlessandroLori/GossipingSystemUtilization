@@ -1,7 +1,6 @@
 package main
 
-//TODO peers generano job, job mandati anche random per scoprire rete, seed eseguono i job inviati dai peer come i peer stessi
-// , reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
+//TODO job mandati anche random per scoprire rete, reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
 
 import (
 	crand "crypto/rand"
