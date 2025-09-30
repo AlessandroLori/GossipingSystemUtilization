@@ -81,6 +81,40 @@ func NewRuntime(
 	return rt
 }
 
+// QuiesceForLeave: ferma tutto ciò che genera traffico o riceve RPC,
+// ma lascia attiva la PBQueue per attaccare i metadati agli ultimi avvisi.
+func (rt *Runtime) QuiesceForLeave() {
+	nodeUp.Store(false)
+
+	// Ferma subito i loop che generano I/O in uscita
+	if rt.Reporter != nil {
+		rt.Reporter.Stop()
+	}
+	if rt.Engine != nil {
+		rt.Engine.Stop()
+	}
+
+	// Blocca subito le RPC IN INGRESSO (non vogliamo più ricevere nulla)
+	grpcserver.Stop(rt.GRPC, rt.Listener, rt.Log)
+	rt.GRPC = nil
+	rt.Listener = nil
+
+	// Ferma SWIM (niente ping/pingreq ulteriori)
+	if rt.Mgr != nil {
+		rt.Mgr.Stop()
+		rt.Mgr = nil
+	}
+
+	// NOTA: NON mettiamo in pausa la PBQueue qui, serve per gli avvisi.
+}
+
+// FinalizeLeaveStop: dopo gli avvisi, freddiamo anche la PBQueue.
+func (rt *Runtime) FinalizeLeaveStop() {
+	if rt.PBQueue != nil {
+		rt.PBQueue.Pause()
+	}
+}
+
 func (rt *Runtime) StartAll() error {
 	// SWIM
 	swimCfg := swim.Config{
@@ -89,7 +123,7 @@ func (rt *Runtime) StartAll() error {
 		IndirectK:         3,
 		SuspicionTimeoutS: 6.0,
 	}
-	rt.Mgr = swim.NewManager(rt.ID, rt.GRPCAddr, rt.Log, rt.Clock, rt.Rng, swimCfg)
+	rt.Mgr = swim.NewManager(rt.ID, rt.GRPCAddr, rt.Log, rt.Clock, rt.Rng, swimCfg, IsNodeUp)
 	rt.Mgr.Start()
 
 	// Anti-Entropy
@@ -105,7 +139,7 @@ func (rt *Runtime) StartAll() error {
 	// Seed dello store con self
 	rt.Store.UpsertBatch([]*proto.Stats{rt.selfStats()})
 
-	// gRPC server (+ Registry locale SEMPRE)
+	// gRPC server
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(
 		rt.IsSeed,
@@ -128,63 +162,43 @@ func (rt *Runtime) StartAll() error {
 		},
 		rt.Rng,
 		rt.PBQueue,
+		IsNodeUp, // <— passa la gate anche al server
 	)
-	if err != nil {
-		return err
-	}
-
-	// ➜ SYNC PERIODICO: porta i peer ALIVE di SWIM dentro la registry locale (anche sui peer).
-	//    Questo dà sempre candidati al coordinator, anche se la registry del seed non è raggiungibile.
-	go func() {
-		for {
-			if !IsNodeUp() {
-				rt.Clock.SleepSim(500 * time.Millisecond)
-				continue
-			}
-			if rt.Registry != nil && rt.Mgr != nil {
-				ap := rt.Mgr.AlivePeers()
-				for _, p := range ap {
-					if p.ID == "" || p.ID == rt.ID || p.Addr == "" {
-						continue
-					}
-					rt.Registry.UpsertPeer(&proto.PeerInfo{
-						NodeId: p.ID,
-						Addr:   p.Addr,
-						IsSeed: false, // da SWIM non lo sappiamo; non serve ai fini del coordinamento
-					})
-				}
-			}
-			rt.Clock.SleepSim(2 * time.Second)
-		}
-	}()
-
 	nodeUp.Store(true)
-	return nil
+	return err
 }
 
 func (rt *Runtime) StopAll() {
 	nodeUp.Store(false)
+
+	// Congela piggyback: non attaccare/accettare più metadati da ora in poi.
 	if rt.PBQueue != nil {
 		rt.PBQueue.Pause()
 	}
 
-	grpcserver.Stop(rt.GRPC, rt.Listener, rt.Log)
+	// Ferma subito i loop che generano I/O in uscita
 	if rt.Reporter != nil {
 		rt.Reporter.Stop()
 	}
 	if rt.Engine != nil {
 		rt.Engine.Stop()
 	}
+
+	// Chiudi l'esposizione di RPC in ingresso
+	grpcserver.Stop(rt.GRPC, rt.Listener, rt.Log)
+
+	// Ferma SWIM (niente più ping/pingreq)
 	if rt.Mgr != nil {
 		rt.Mgr.Stop()
 	}
+
 	// azzera i riferimenti per evitare doppi Stop su stessa istanza
 	rt.GRPC = nil
 	rt.Listener = nil
 	rt.Reporter = nil
 	rt.Engine = nil
 	rt.Mgr = nil
-	// PBQueue, Store restano (persistono tra recovery)
+	// PBQueue e Store restano (persistono tra recovery)
 }
 
 func (rt *Runtime) RecoverAll() {
@@ -194,7 +208,7 @@ func (rt *Runtime) RecoverAll() {
 	nodeUp.Store(true)
 
 	swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
-	rt.Mgr = swim.NewManager(rt.ID, rt.GRPCAddr, rt.Log, rt.Clock, rt.Rng, swimCfg)
+	rt.Mgr = swim.NewManager(rt.ID, rt.GRPCAddr, rt.Log, rt.Clock, rt.Rng, swimCfg, IsNodeUp)
 	rt.Mgr.Start()
 
 	aeCfg := antientropy.Config{PeriodSimS: 3.0, Fanout: 2, SampleSize: 8, TtlSimS: 12.0}
@@ -205,12 +219,9 @@ func (rt *Runtime) RecoverAll() {
 	rt.Reporter = antientropy.NewReporter(rt.Log, rt.Clock, rt.Store, rt.selfStats, repCfg)
 	rt.Reporter.Start()
 
-	nodeUp.Store(true)
-
 	var err error
 	rt.GRPC, rt.Listener, rt.Registry, err = grpcserver.Start(
 		rt.IsSeed, rt.GRPCAddr, rt.Log, rt.Clock, rt.Mgr, rt.ID,
-		//seed.Sampler(func(max int) []*proto.Stats { return rt.Engine.LocalSample(max) }),
 		seed.Sampler(rt.safeLocalSample),
 		func() *proto.Stats {
 			s := rt.Node.CurrentStatsProto()
@@ -225,11 +236,11 @@ func (rt *Runtime) RecoverAll() {
 		},
 		rt.Rng,
 		rt.PBQueue,
+		IsNodeUp, // <— gate
 	)
 	if err != nil {
 		rt.Log.Errorf("startGRPCServer (recovery) failed: %v", err)
 	}
-
 	rt.tryJoinPostRecovery()
 }
 

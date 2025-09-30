@@ -2,7 +2,6 @@ package seed
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"GossipSystemUtilization/internal/logx"
@@ -11,10 +10,9 @@ import (
 	"GossipSystemUtilization/proto"
 
 	"google.golang.org/grpc"
-	//"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	//"google.golang.org/grpc/status"
-	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type Sampler func(max int) []*proto.Stats
@@ -32,6 +30,8 @@ type Server struct {
 	selfStatsFn   func() *proto.Stats
 	applyCommitFn func(jobID string, cpu, mem, gpu float64, durMs int64) bool
 	cancelFn      func(jobID string) bool
+
+	isUp func() bool // <— NUOVO: gate runtime
 }
 
 func NewServer(
@@ -45,6 +45,7 @@ func NewServer(
 	selfStatsFn func() *proto.Stats,
 	applyCommitFn func(jobID string, cpu, mem, gpu float64, durMs int64) bool,
 	cancelFn func(jobID string) bool,
+	isUp func() bool, // <— NUOVO
 ) *Server {
 	return &Server{
 		isSeed:        isSeed,
@@ -57,123 +58,81 @@ func NewServer(
 		selfStatsFn:   selfStatsFn,
 		applyCommitFn: applyCommitFn,
 		cancelFn:      cancelFn,
+		isUp:          isUp,
 	}
+}
+
+func (s *Server) rejectIfDown(name string) error {
+	if s.isUp != nil && !s.isUp() {
+		s.log.Warnf("RPC %s REJECTED — node in LEAVE", name)
+		return status.Error(codes.Unavailable, "node is leaving")
+	}
+	return nil
 }
 
 // === JOIN: solo i seed rispondono ===
 func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinReply, error) {
+	if err := s.rejectIfDown("Join"); err != nil {
+		return nil, err
+	}
 	if req == nil {
 		return &proto.JoinReply{}, nil
 	}
-
-	// Aggiorna membership SWIM (così comparirà tra gli ALIVE)
 	if s.mgr != nil {
 		s.mgr.AddPeer(req.NodeId, req.Addr)
 	}
-
-	// ➜ Registry locale: traccia sempre il peer e il suo "ultimo-visto" di Stats
 	if s.reg != nil {
-		s.reg.UpsertPeer(&proto.PeerInfo{
-			NodeId: req.NodeId,
-			Addr:   req.Addr,
-			// IsSeed non lo sappiamo dal JoinRequest; non è necessario qui
-		})
+		s.reg.UpsertPeer(&proto.PeerInfo{NodeId: req.NodeId, Addr: req.Addr})
 		if req.MyStats != nil {
 			s.reg.UpsertStats(req.MyStats)
 		}
 	}
-
-	// Prepariamo una reply sensata:
-	// - peers: un piccolo campione dalla nostra registry (esclude l'ID del joiner)
-	// - stats_snapshot: qualche Stat recente dal nostro store via sampler
 	var peers []*proto.PeerInfo
 	if s.reg != nil {
-		// sovracampiona un po' e poi lascia che il client tagli se vuole
 		peers = s.reg.SamplePeers(req.NodeId, 32)
 	}
 	var snapshot []*proto.Stats
 	if s.sampler != nil {
 		snapshot = s.sampler(64)
 	}
-
-	return &proto.JoinReply{
-		Peers:         peers,
-		StatsSnapshot: snapshot,
-	}, nil
+	return &proto.JoinReply{Peers: peers, StatsSnapshot: snapshot}, nil
 }
 
-// === PING: tutti i nodi rispondono ===
 func (s *Server) Ping(ctx context.Context, req *proto.PingRequest) (*proto.PingReply, error) {
-	// Log ricezione Ping
-	s.log.Infof("SWIM PING RECV ← from=%s seq=%d", req.GetFromId(), req.GetSeq())
-
-	// Eventuali annunci SWIM piggybackati (x-swim: dead:<id>)
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		for _, v := range md.Get("x-swim") {
-			if strings.HasPrefix(v, "dead:") {
-				id := strings.TrimPrefix(v, "dead:")
-				s.log.Warnf("SWIM UPDATE RECV ← from=%s  %s DEAD", req.GetFromId(), id)
-			}
-		}
+	if err := s.rejectIfDown("Ping"); err != nil {
+		return nil, err
 	}
-
-	// Risposta OK
 	return &proto.PingReply{Ok: true, TsMs: s.clock.NowSimMs()}, nil
 }
 
-// === PINGREQ: tutti i nodi aiutano a fare un ping indiretto ===
 func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto.PingReqReply, error) {
-	from := req.GetFromId()
-	target := req.GetTargetAddr()
-
-	// Log ricezione PingReq
-	s.log.Infof("SWIM PINGREQ RECV ← from=%s target=%s seq=%d", from, target, req.GetSeq())
-
-	// Eventuali annunci SWIM piggybackati (x-swim: dead:<id>)
-	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		for _, v := range md.Get("x-swim") {
-			if strings.HasPrefix(v, "dead:") {
-				id := strings.TrimPrefix(v, "dead:")
-				s.log.Warnf("SWIM UPDATE RECV ← from=%s  %s DEAD", from, id)
-			}
-		}
+	if err := s.rejectIfDown("PingReq"); err != nil {
+		return nil, err
 	}
-
-	// Come helper: provo a pingare direttamente il target
 	dialCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-
-	conn, err := grpc.DialContext(
-		dialCtx,
-		target,
+	conn, err := grpc.DialContext(dialCtx, req.TargetAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock(),
-	)
+		grpc.WithBlock())
 	if err != nil {
-		s.log.Warnf("SWIM PING (as helper) → to=%s dial fail", target)
 		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSimMs()}, nil
 	}
 	defer conn.Close()
 
 	cli := proto.NewGossipClient(conn)
-
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel2()
-
-	s.log.Infof("SWIM PING (as helper) → to=%s", target)
-	_, err = cli.Ping(ctx2, &proto.PingRequest{FromId: "helper@" + s.myID, Seq: req.GetSeq()})
+	_, err = cli.Ping(ctx2, &proto.PingRequest{FromId: s.myID, Seq: req.Seq})
 	if err != nil {
-		s.log.Warnf("SWIM PING (as helper) ← to=%s ok=false (%v)", target, err)
 		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSimMs()}, nil
 	}
-
-	s.log.Infof("SWIM PING (as helper) ← to=%s ok=true", target)
 	return &proto.PingReqReply{Ok: true, TsMs: s.clock.NowSimMs()}, nil
 }
 
-// === EXCHANGE AVAIL: push-pull semplice ===
 func (s *Server) ExchangeAvail(ctx context.Context, in *proto.AvailBatch) (*proto.AvailBatch, error) {
-	// ➜ Registry locale: aggiorna "ultimo-visto" delle stats per ogni nodo
+	if err := s.rejectIfDown("ExchangeAvail"); err != nil {
+		return nil, err
+	}
 	if s.reg != nil && in != nil {
 		for _, st := range in.Stats {
 			if st != nil {
@@ -181,9 +140,6 @@ func (s *Server) ExchangeAvail(ctx context.Context, in *proto.AvailBatch) (*prot
 			}
 		}
 	}
-
-	// Rispondi con un piccolo snapshot dal nostro store (via sampler),
-	// così l'anti-entropy continua a diffondere informazioni aggiornate.
 	var out []*proto.Stats
 	if s.sampler != nil {
 		out = s.sampler(64)
@@ -192,6 +148,9 @@ func (s *Server) ExchangeAvail(ctx context.Context, in *proto.AvailBatch) (*prot
 }
 
 func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.ProbeReply, error) {
+	if err := s.rejectIfDown("Probe"); err != nil {
+		return nil, err
+	}
 	js := req.Job
 	var p *proto.Stats
 	if s.selfStatsFn != nil {
@@ -204,7 +163,6 @@ func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.Pro
 		}, nil
 	}
 
-	// headroom stimato
 	headCPU := 100 - p.CpuPct
 	headMEM := 100 - p.MemPct
 	var headGPU float64
@@ -214,7 +172,7 @@ func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.Pro
 		headGPU = 100 - p.GpuPct
 	}
 
-	const safety = 0.05 // 5%
+	const safety = 0.05
 	accept := true
 	reason := ""
 	if js.CpuPct > 0 && js.CpuPct > headCPU*(1.0-safety) {
@@ -230,20 +188,16 @@ func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.Pro
 			accept, reason = false, "gpu_insufficient"
 		}
 	}
-
 	score := 0.0
 	if accept {
-		// più headroom residuo = punteggio migliore
 		remCPU := headCPU - js.CpuPct
 		remMEM := headMEM - js.MemPct
 		remGPU := 0.0
 		if headGPU >= 0 {
 			remGPU = headGPU - js.GpuPct
 		}
-		// somma normalizzata
 		score = remCPU + remMEM + remGPU
 	}
-
 	return &proto.ProbeReply{
 		NodeId:      s.myID,
 		WillAccept:  accept,
@@ -257,7 +211,9 @@ func (s *Server) Probe(ctx context.Context, req *proto.ProbeRequest) (*proto.Pro
 }
 
 func (s *Server) Commit(ctx context.Context, req *proto.CommitRequest) (*proto.CommitReply, error) {
-	// Log di ingresso
+	if err := s.rejectIfDown("Commit"); err != nil {
+		return nil, err
+	}
 	s.log.Infof("COMMIT ← job=%s cpu=%.1f%% mem=%.1f%% gpu=%.1f%% dur=%s",
 		req.JobId, req.CpuPct, req.MemPct, req.GpuPct, time.Duration(req.DurationMs)*time.Millisecond)
 
@@ -265,32 +221,29 @@ func (s *Server) Commit(ctx context.Context, req *proto.CommitRequest) (*proto.C
 		s.log.Warnf("COMMIT ✖ job=%s reason=no_apply_commit", req.JobId)
 		return &proto.CommitReply{Ok: false, Reason: "no_apply_commit"}, nil
 	}
-
 	ok := s.applyCommitFn(req.JobId, req.CpuPct, req.MemPct, req.GpuPct, req.DurationMs)
 	if !ok {
 		s.log.Warnf("COMMIT ✖ job=%s reason=insufficient_headroom", req.JobId)
 		return &proto.CommitReply{Ok: false, Reason: "insufficient_headroom"}, nil
 	}
-
 	s.log.Infof("COMMIT ✓ job=%s", req.JobId)
 	return &proto.CommitReply{Ok: true}, nil
 }
 
 func (s *Server) Cancel(ctx context.Context, req *proto.CancelRequest) (*proto.CancelReply, error) {
-	// Log di ingresso
+	if err := s.rejectIfDown("Cancel"); err != nil {
+		return nil, err
+	}
 	s.log.Infof("CANCEL ← job=%s", req.JobId)
-
 	if s.cancelFn == nil {
 		s.log.Warnf("CANCEL ✖ job=%s reason=no_cancel_fn", req.JobId)
 		return &proto.CancelReply{Ok: false, Reason: "no_cancel_fn"}, nil
 	}
-
 	ok := s.cancelFn(req.JobId)
 	if !ok {
 		s.log.Warnf("CANCEL ✖ job=%s reason=unknown_job", req.JobId)
 		return &proto.CancelReply{Ok: false, Reason: "unknown_job"}, nil
 	}
-
 	s.log.Infof("CANCEL ✓ job=%s", req.JobId)
 	return &proto.CancelReply{Ok: true}, nil
 }

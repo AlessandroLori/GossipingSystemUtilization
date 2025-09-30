@@ -53,14 +53,14 @@ func (a *App) Init() error {
 	// Nodo
 	a.Node = node.New(a.ID, a.Addr, a.Clock, a.Log, a.Rng)
 
-	// SWIM
+	// SWIM (con gate IsNodeUp)
 	swimCfg := swim.Config{
 		PeriodSimS:        1.0,
 		TimeoutRealMs:     250,
 		IndirectK:         3,
 		SuspicionTimeoutS: 6.0,
 	}
-	a.SwimMgr = swim.NewManager(a.ID, a.Addr, a.Log, a.Clock, a.Rng, swimCfg)
+	a.SwimMgr = swim.NewManager(a.ID, a.Addr, a.Log, a.Clock, a.Rng, swimCfg, IsNodeUp)
 	a.SwimMgr.Start()
 
 	// Anti-entropy
@@ -71,8 +71,7 @@ func (a *App) Init() error {
 		return s
 	}
 
-	// --- MODIFICA 1: INIZIALIZZARE PBQ PRIMA DI AEEng ---
-	// Piggyback queue (TTL ~110s, cap 200)
+	// Piggyback queue (TTL ~110s, cap 200) — inizializzata PRIMA dell'engine
 	a.PBQ = piggyback.NewQueue(a.Log, a.Clock, 200, 110*time.Second)
 
 	aeCfg := antientropy.Config{
@@ -81,7 +80,6 @@ func (a *App) Init() error {
 		SampleSize: 8,
 		TtlSimS:    12.0,
 	}
-	// --- MODIFICA 2: PASSARE a.PBQ ALLA FUNZIONE NewEngine ---
 	a.AEEng = antientropy.NewEngine(a.Log, a.Clock, a.Rng, a.AEStore, a.SwimMgr, a.PBQ, selfSampler, aeCfg)
 	a.AEEng.Start()
 
@@ -93,7 +91,7 @@ func (a *App) Init() error {
 	// Semina lo store con le stats locali
 	a.AEStore.UpsertBatch([]*proto.Stats{selfSampler()})
 
-	// Aggiorna periodicamente la piggyback queue con lo "self advert" dalle Stats
+	// Aggiornamento periodico dello "self advert" in PBQ
 	go func() {
 		for {
 			s := a.Node.CurrentStatsProto()
@@ -116,7 +114,7 @@ func (a *App) Init() error {
 		a.Clock,
 		a.SwimMgr,
 		a.ID,
-		statsSampler,
+		seed.Sampler(statsSampler), // <-- tipo corretto
 		func() *proto.Stats {
 			s := a.Node.CurrentStatsProto()
 			s.TsMs = a.Clock.NowSimMs()
@@ -130,6 +128,7 @@ func (a *App) Init() error {
 		},
 		a.Rng,
 		a.PBQ,
+		IsNodeUp, // <-- gate per rifiutare RPC durante la leave
 	)
 	if err != nil {
 		return fmt.Errorf("start gRPC server: %w", err)

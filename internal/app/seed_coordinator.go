@@ -446,6 +446,10 @@ func StartSeedCoordinator(
 			// 1) Inter-arrivo (SIM)
 			waitS := gen.meanS * r.ExpFloat64()
 			clock.SleepSim(time.Duration(waitS * float64(time.Second)))
+			// Se durante l'attesa siamo diventati "down", salta tutto
+			if !IsNodeUp() {
+				continue
+			}
 
 			// 2) Disegna job
 			job := gen.drawJob()
@@ -469,6 +473,11 @@ func StartSeedCoordinator(
 				if IsNodeUp() {
 					log.Warnf("COORD: nessun peer disponibile per job=%s; ritento più tardi", job.id)
 				}
+				continue
+			}
+
+			// Se nel frattempo siamo "down", non fare ranking/probe
+			if !IsNodeUp() {
 				continue
 			}
 

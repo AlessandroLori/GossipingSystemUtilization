@@ -8,6 +8,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	//"GossipSystemUtilization/internal/grpcserver"
 	"GossipSystemUtilization/internal/logx"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
@@ -40,12 +41,10 @@ func StartLeaveRecoveryWithRuntime(
 
 	printTrans := (in.PrintTransitions != nil && *in.PrintTransitions)
 
-	// Profilo iniziale (come per i fault)
 	log.Infof("LEAVE PROFILE → freq_weights=%v freq_rate_per_min=%v dur_weights=%v dur_mean_s=%v",
 		in.FrequencyClassWeights, in.FrequencyPerMinSim, in.DurationClassWeights, in.DurationMeanSimS)
 
 	go func() {
-		// helper per pick pesato
 		pickKey := func(m map[string]float64) string {
 			sum := 0.0
 			for _, v := range m {
@@ -73,62 +72,68 @@ func StartLeaveRecoveryWithRuntime(
 		}
 
 		for {
-			// 1) Quando scatta la leave (tempo simulato)
-			freqClass := pickKey(in.FrequencyClassWeights) // none/low/medium/high
+			// 1) attesa simulata prima della leave
+			freqClass := pickKey(in.FrequencyClassWeights)
 			ratePerMin := in.FrequencyPerMinSim[freqClass]
 			waitSim := 999999.0
 			if ratePerMin > 0 {
-				minutes := r.ExpFloat64() / ratePerMin
-				waitSim = minutes * 60.0
+				waitSim = (r.ExpFloat64() / ratePerMin) * 60.0
 			}
-			if waitSim > 1e8 { // “none”
-				waitSim = 60.0 // riprova tra un minuto sim per sicurezza
+			if waitSim > 1e8 {
+				waitSim = 60.0
 			}
 			clock.SleepSim(time.Duration(waitSim * float64(time.Second)))
 
-			// 2) Quanto dura
-			durClass := pickKey(in.DurationClassWeights) // short/medium/long
+			// 2) durata leave
+			durClass := pickKey(in.DurationClassWeights)
 			meanS := in.DurationMeanSimS[durClass]
 			if meanS <= 0 {
 				meanS = 10
 			}
-			durS := meanS * (0.7 + 0.6*r.Float64()) // 0.7–1.3 × mean
+			durS := meanS * (0.7 + 0.6*r.Float64())
 			dur := time.Duration(durS * float64(time.Second))
 
-			// 3) Imposta Busy+Leave e FORZA subito un self-advert aggiornato
+			// === Sequenza hard-stop ===
+			// A) mettiamo subito il semaforo rosso per chi prova a generare/mandare job
+			nodeUp.Store(false)
+
+			// B) aggiorniamo i flag di busy/leave e pubblichiamo immediatamente lo self-advert
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetBusyFor(dur)
 				rt.PBQueue.SetLeaveFor(dur)
-				rt.PBQueue.Pause()
 				forceSelfAdvertLeave(rt, clock, selfID, dur)
 			}
-			announceLeaveToNeighbors(log, clock, r, rt, selfID, dur)
+
+			// C) QUIET MODE: fermiamo Reporter, Engine, SWIM e chiudiamo il server gRPC
+			//    (nessun inbound né traffic di background). Lasciamo attiva solo la PBQueue.
+			rt.QuiesceForLeave()
+
+			// D) inviamo SINCRONO 2–3 avvisi (client-side) che veicolano il piggyback di leave
+			announceLeaveToNeighborsSync(log, clock, r, rt, selfID, dur)
 
 			if printTrans {
 				log.Warnf("LEAVE → DOWN (graceful) — duration=%s", dur.Truncate(100*time.Millisecond))
 			}
 
-			// 4) Stop servizi (come i fault)
-			rt.StopAll()
+			// E) freddiamo anche la PBQueue: da qui in avanti nessun attach/recv piggyback
+			rt.FinalizeLeaveStop()
 
-			// 5) Attendi durata simulata
+			// 3) attendi la durata simulata
 			clock.SleepSim(dur)
 
-			// 6) Restart + re-join
+			// 4) restart + pulizia flag + re-join
 			if printTrans {
 				log.Warnf("LEAVE ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
 			}
 			if err := rt.StartAll(); err != nil {
 				log.Errorf("LEAVE restart error: %v", err)
 			}
-			// cancella i flag di leave/busy per i nuovi piggyback e pubblica stato “clean”
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetLeaveFor(0)
 				rt.PBQueue.SetBusyFor(0)
 				forceSelfAdvertLeave(rt, clock, selfID, 0)
-				rt.PBQueue.Resume()
-				// ping soft di rientro (riusa announceLeave ma con dur=0 o fai una back-announce simile)
-				announceLeaveToNeighbors(log, clock, r, rt, selfID, 250*time.Millisecond)
+				// piccolo “touch” di rientro
+				announceLeaveToNeighborsSync(log, clock, r, rt, selfID, 250*time.Millisecond)
 			}
 			rt.TryJoinIfNeeded()
 		}
@@ -167,7 +172,16 @@ func forceSelfAdvertLeave(rt *Runtime, clock *simclock.Clock, selfID string, d t
 	rt.PBQueue.Upsert(a)
 }
 
-func announceLeaveToNeighbors(log *logx.Logger, clock *simclock.Clock, r *rand.Rand, rt *Runtime, selfID string, dur time.Duration) {
+// announceLeaveToNeighborsSync: seleziona pochi vicini e invia SINCRONO una Probe "vuota"
+// per veicolare il piggyback con BusyUntil/LeaveUntil aggiornati. Timeout stretto, nessuna goroutine.
+func announceLeaveToNeighborsSync(
+	log *logx.Logger,
+	clock *simclock.Clock,
+	r *rand.Rand,
+	rt *Runtime,
+	selfID string,
+	dur time.Duration,
+) {
 	if rt == nil || rt.Registry == nil {
 		return
 	}
@@ -179,28 +193,35 @@ func announceLeaveToNeighbors(log *logx.Logger, clock *simclock.Clock, r *rand.R
 	if len(peers) < n {
 		n = len(peers)
 	}
-
 	log.Infof("LEAVE announce → touching %d neighbors to spread BusyUntil+Leave=%s",
 		n, dur.Truncate(100*time.Millisecond))
 
-	for i := 0; i < n; i++ {
-		p := peers[r.Intn(len(peers))]
-		go func(addr string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-			defer cancel()
-			conn, err := grpc.DialContext(ctx, addr,
-				grpc.WithTransportCredentials(insecure.NewCredentials()),
-				grpc.WithBlock(),
-				grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(rt.PBQueue)),
-			)
-			if err != nil {
-				return
-			}
+	// mescola e prendi i primi n
+	r.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
+	peers = peers[:n]
+
+	for _, p := range peers {
+		addr := p.Addr
+		// timeout piccolo per non restare attivi a lungo
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		conn, err := grpc.DialContext(ctx, addr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithBlock(),
+			grpc.WithUnaryInterceptor(piggyback.UnaryClientInterceptor(rt.PBQueue)),
+		)
+		cancel()
+		if err != nil {
+			continue
+		}
+		func() {
 			defer conn.Close()
 			cli := proto.NewGossipClient(conn)
+			ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel2()
 			// Job minimale (0%) solo per generare traffico e portare l’advert
 			js := &proto.JobSpec{CpuPct: 0, MemPct: 0, GpuPct: 0, DurationMs: 1}
-			_, _ = cli.Probe(ctx, &proto.ProbeRequest{Job: js})
-		}(p.Addr)
+			_, _ = cli.Probe(ctx2, &proto.ProbeRequest{Job: js})
+			// il server remoto stamperà “LEAVE UPDATE RECV …”
+		}()
 	}
 }

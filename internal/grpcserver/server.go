@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-// Start avvia il server gRPC e crea SEMPRE una Registry locale (seed e peer).
+// Start avvia il server gRPC e (se seed) crea il Registry locale.
 func Start(
 	isSeed bool,
 	grpcAddr string,
@@ -29,6 +29,7 @@ func Start(
 	cancelFn func(string) bool,
 	r *rand.Rand,
 	pbq *piggyback.Queue,
+	isUp func() bool, // <— NUOVO: gate runtime
 ) (s *grpc.Server, lis net.Listener, reg *seed.Registry, err error) {
 
 	lis, err = net.Listen("tcp", grpcAddr)
@@ -41,9 +42,10 @@ func Start(
 		),
 	)
 
-	// ➜ REGISTRY: su TUTTI i nodi (seed e peer)
-	reg = seed.NewRegistry(r)
-	reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: isSeed})
+	if isSeed {
+		reg = seed.NewRegistry(r)
+		reg.UpsertPeer(&proto.PeerInfo{NodeId: myID, Addr: grpcAddr, IsSeed: true})
+	}
 
 	srv := seed.NewServer(
 		isSeed,
@@ -56,10 +58,11 @@ func Start(
 		selfStatsFn,
 		applyCommitFn,
 		cancelFn,
+		isUp, // <— passa la gate
 	)
 	proto.RegisterGossipServer(s, srv)
 
-	// Serve async
+	// Serve
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			log.Errorf("gRPC Serve: %v", err)

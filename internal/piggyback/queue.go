@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -261,24 +262,38 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		// Se la coda è in pausa (leave/fault), non inviare proprio l'RPC.
-		if q != nil && q.IsPaused() {
-			return status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
-		}
-
-		// Altrimenti, allega gli adverts (come prima)
-		if q != nil {
+		if q != nil && !q.IsPaused() {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
-				nowMs := q.clock.NowSim().UnixMilli()
 				var summary []string
 				for _, a := range ads {
-					summary = append(summary, q.fmtAdvert(a, nowMs))
+					summary = append(summary,
+						fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
+							a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+					)
 				}
-				q.log.Infof("PIGGYBACK SEND → %d adverts:\n  - %s", len(ads), strings.Join(summary, "\n  - "))
+				// target (addr) se disponibile
+				target := ""
+				if cc != nil {
+					target = cc.Target()
+				}
+				q.log.Infof("PIGGYBACK SEND → to=%s attaching %d adverts: %v", target, len(ads), summary)
+
+				// Log esplicito delle LEAVE che stiamo propagando ora
+				nowMs := q.clock.NowSim().UnixMilli()
+				var leaves []string
+				for _, a := range ads {
+					if a.LeaveUntilMs > nowMs {
+						rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
+						leaves = append(leaves, fmt.Sprintf("%s~%s", a.NodeId, rem.Truncate(100*time.Millisecond)))
+					}
+				}
+				if len(leaves) > 0 {
+					q.log.Warnf("LEAVE UPDATE SEND → to=%s  %d notice(s): %s", target, len(leaves), strings.Join(leaves, ", "))
+				}
+
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
 			}
-
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
@@ -304,22 +319,28 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					if err != nil || len(arr) == 0 {
 						continue
 					}
-					nowMs := q.clock.NowSim().UnixMilli()
-					var summary []string
-					for _, a := range arr {
-						summary = append(summary, q.fmtAdvert(a, nowMs))
+					// from (addr) se disponibile
+					from := ""
+					if p, okp := peer.FromContext(ctx); okp && p != nil && p.Addr != nil {
+						from = p.Addr.String()
 					}
-					q.log.Infof("PIGGYBACK RECV ← %d adverts:\n  - %s", len(arr), strings.Join(summary, "\n  - "))
+
+					var summary []string
+					nowMs := q.clock.NowSim().UnixMilli()
+					for _, a := range arr {
+						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU))
+					}
+					q.log.Infof("PIGGYBACK RECV ← from=%s received %d adverts: %v", from, len(arr), summary)
+
 					for _, a := range arr {
 						if a.LeaveUntilMs > nowMs {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
-							q.log.Infof("LEAVE NOTICE ← node=%s for ~%s", a.NodeId, rem.Truncate(100*time.Millisecond))
+							q.log.Warnf("LEAVE UPDATE RECV ← from=%s node=%s remain≈%s", from, a.NodeId, rem.Truncate(100*time.Millisecond))
 						}
 						q.Upsert(a)
 					}
 				}
 			}
-
 		}
 		return handler(ctx, req)
 	}

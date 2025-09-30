@@ -72,6 +72,7 @@ type Manager struct {
 	seq uint64
 
 	stopCh chan struct{}
+	gate   func() bool
 }
 
 type Config struct {
@@ -104,7 +105,7 @@ func (m *Manager) FanoutHint(hint int) int {
 	return hint
 }
 
-func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock, rnd *rand.Rand, cfg Config) *Manager {
+func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock, rnd *rand.Rand, cfg Config, gate func() bool) *Manager {
 	if cfg.PeriodSimS <= 0 {
 		cfg.PeriodSimS = 1.0
 	}
@@ -132,6 +133,7 @@ func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock
 		suspicionTimeout: time.Duration(cfg.SuspicionTimeoutS * float64(time.Second)),
 
 		stopCh: make(chan struct{}),
+		gate:   gate,
 	}
 }
 
@@ -287,6 +289,10 @@ func (m *Manager) nextSeq() uint64 {
 
 func (m *Manager) markDeath(id string) {
 	m.mu.Lock()
+	// Paracadute nel caso qualcuno in futuro cambi il costruttore
+	if m.deathAnnounce == nil {
+		m.deathAnnounce = make(map[string]time.Time)
+	}
 	m.deathAnnounce[id] = m.clock.NowSim().Add(5 * m.period) // annuncia ~5 tick
 	m.mu.Unlock()
 }
@@ -384,6 +390,11 @@ func (m *Manager) Start() {
 			case <-m.stopCh:
 				return
 			default:
+				// gate: se il nodo è in leave, SWIM resta silenzioso
+				if m.gate != nil && !m.gate() {
+					m.clock.SleepSim(m.period)
+					continue
+				}
 				m.clock.SleepSim(m.period)
 				m.tick()
 			}
