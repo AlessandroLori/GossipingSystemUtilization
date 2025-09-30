@@ -2,6 +2,7 @@ package seed
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"GossipSystemUtilization/internal/logx"
@@ -13,6 +14,7 @@ import (
 	//"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	//"google.golang.org/grpc/status"
+	"google.golang.org/grpc/metadata"
 )
 
 type Sampler func(max int) []*proto.Stats
@@ -102,29 +104,70 @@ func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinR
 
 // === PING: tutti i nodi rispondono ===
 func (s *Server) Ping(ctx context.Context, req *proto.PingRequest) (*proto.PingReply, error) {
+	// Log ricezione Ping
+	s.log.Infof("SWIM PING RECV ← from=%s seq=%d", req.GetFromId(), req.GetSeq())
+
+	// Eventuali annunci SWIM piggybackati (x-swim: dead:<id>)
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		for _, v := range md.Get("x-swim") {
+			if strings.HasPrefix(v, "dead:") {
+				id := strings.TrimPrefix(v, "dead:")
+				s.log.Warnf("SWIM UPDATE RECV ← from=%s  %s DEAD", req.GetFromId(), id)
+			}
+		}
+	}
+
+	// Risposta OK
 	return &proto.PingReply{Ok: true, TsMs: s.clock.NowSimMs()}, nil
 }
 
 // === PINGREQ: tutti i nodi aiutano a fare un ping indiretto ===
 func (s *Server) PingReq(ctx context.Context, req *proto.PingReqRequest) (*proto.PingReqReply, error) {
+	from := req.GetFromId()
+	target := req.GetTargetAddr()
+
+	// Log ricezione PingReq
+	s.log.Infof("SWIM PINGREQ RECV ← from=%s target=%s seq=%d", from, target, req.GetSeq())
+
+	// Eventuali annunci SWIM piggybackati (x-swim: dead:<id>)
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		for _, v := range md.Get("x-swim") {
+			if strings.HasPrefix(v, "dead:") {
+				id := strings.TrimPrefix(v, "dead:")
+				s.log.Warnf("SWIM UPDATE RECV ← from=%s  %s DEAD", from, id)
+			}
+		}
+	}
+
+	// Come helper: provo a pingare direttamente il target
 	dialCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	conn, err := grpc.DialContext(dialCtx, req.TargetAddr,
+	conn, err := grpc.DialContext(
+		dialCtx,
+		target,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithBlock())
+		grpc.WithBlock(),
+	)
 	if err != nil {
+		s.log.Warnf("SWIM PING (as helper) → to=%s dial fail", target)
 		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSimMs()}, nil
 	}
 	defer conn.Close()
 
 	cli := proto.NewGossipClient(conn)
+
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel2()
-	_, err = cli.Ping(ctx2, &proto.PingRequest{FromId: s.myID, Seq: req.Seq})
+
+	s.log.Infof("SWIM PING (as helper) → to=%s", target)
+	_, err = cli.Ping(ctx2, &proto.PingRequest{FromId: "helper@" + s.myID, Seq: req.GetSeq()})
 	if err != nil {
+		s.log.Warnf("SWIM PING (as helper) ← to=%s ok=false (%v)", target, err)
 		return &proto.PingReqReply{Ok: false, TsMs: s.clock.NowSimMs()}, nil
 	}
+
+	s.log.Infof("SWIM PING (as helper) ← to=%s ok=true", target)
 	return &proto.PingReqReply{Ok: true, TsMs: s.clock.NowSimMs()}, nil
 }
 

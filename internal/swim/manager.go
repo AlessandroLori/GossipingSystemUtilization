@@ -4,6 +4,7 @@ import (
 	"context"
 	"math/rand"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 )
 
 type Status int
@@ -43,6 +45,11 @@ type peerEntry struct {
 	SuspectDeadline time.Time
 }
 
+const mdKeySwim = "x-swim" // metadata per annunci SWIM: es. "dead:<nodeID>"
+
+// Callback opzionale per notifiche membership (ALIVE/SUSPECT/DEAD)
+type StatusChangeHandler func(id, addr string, old, new Status, reason string)
+
 type Manager struct {
 	selfID   string
 	selfAddr string
@@ -51,8 +58,10 @@ type Manager struct {
 	clock *simclock.Clock
 	rnd   *rand.Rand
 
-	mu    sync.RWMutex
-	peers map[string]*peerEntry
+	mu            sync.RWMutex
+	peers         map[string]*peerEntry
+	onChange      StatusChangeHandler
+	deathAnnounce map[string]time.Time
 
 	// parametri SWIM
 	period           time.Duration // es. 1s SIM
@@ -109,12 +118,13 @@ func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock
 		cfg.SuspicionTimeoutS = 6.0
 	}
 	return &Manager{
-		selfID:   selfID,
-		selfAddr: selfAddr,
-		log:      log,
-		clock:    clock,
-		rnd:      rnd,
-		peers:    make(map[string]*peerEntry),
+		selfID:        selfID,
+		selfAddr:      selfAddr,
+		log:           log,
+		clock:         clock,
+		rnd:           rnd,
+		peers:         make(map[string]*peerEntry),
+		deathAnnounce: make(map[string]time.Time),
 
 		period:           time.Duration(cfg.PeriodSimS * float64(time.Second)),
 		timeout:          time.Duration(cfg.TimeoutRealMs) * time.Millisecond,
@@ -123,6 +133,10 @@ func NewManager(selfID, selfAddr string, log *logx.Logger, clock *simclock.Clock
 
 		stopCh: make(chan struct{}),
 	}
+}
+
+func (m *Manager) SetStatusChangeHandler(h StatusChangeHandler) {
+	m.onChange = h
 }
 
 func (m *Manager) AddPeer(id, addr string) {
@@ -150,8 +164,14 @@ func (m *Manager) setStatus(p *peerEntry, newSt Status, reason string) {
 		p.SuspectDeadline = time.Time{}
 	case Suspect:
 		p.SuspectDeadline = m.clock.NowSim().Add(m.suspicionTimeout)
+	case Dead:
+		m.markDeath(p.ID) // annunceremo questa morte per qualche tick
 	}
 	m.log.Warnf("SWIM %s → %s  peer=%s (%s)  reason=%s", old, newSt, p.ID, p.Addr, reason)
+
+	if m.onChange != nil {
+		m.onChange(p.ID, p.Addr, old, newSt, reason)
+	}
 }
 
 func (m *Manager) listCandidates() []*peerEntry {
@@ -178,42 +198,83 @@ func (m *Manager) pickTarget() *peerEntry {
 }
 
 func (m *Manager) pingOnce(addr string) bool {
+	deaths := m.collectDeathAnnounces()
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	defer cancel()
+
+	if len(deaths) > 0 {
+		// costruisci coppie (chiave,valore) per AppendToOutgoingContext
+		kv := make([]string, 0, len(deaths)*2)
+		for _, id := range deaths {
+			kv = append(kv, mdKeySwim, "dead:"+id)
+		}
+		ctx = metadata.AppendToOutgoingContext(ctx, kv...)
+		m.log.Warnf("SWIM UPDATE SEND → %d death(s) to=%s  ids=%s", len(deaths), addr, strings.Join(deaths, ","))
+	}
+
 	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
+		m.log.Warnf("SWIM PING → to=%s dial fail", addr)
 		return false
 	}
 	defer conn.Close()
+
 	cli := proto.NewGossipClient(conn)
+	m.log.Infof("SWIM PING → to=%s", addr)
 	_, err = cli.Ping(ctx, &proto.PingRequest{FromId: m.selfID, Seq: m.nextSeq()})
-	return err == nil
+	if err != nil {
+		m.log.Warnf("SWIM PING ← to=%s ok=false (%v)", addr, err)
+		return false
+	}
+	m.log.Infof("SWIM PING ← to=%s ok=true", addr)
+	return true
 }
 
 func (m *Manager) pingReqK(target *peerEntry, helpers []*peerEntry) bool {
+	deaths := m.collectDeathAnnounces()
 	okAny := false
+
 	for i, h := range helpers {
 		if i >= m.indirectK {
 			break
 		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
+		if len(deaths) > 0 {
+			kv := make([]string, 0, len(deaths)*2)
+			for _, id := range deaths {
+				kv = append(kv, mdKeySwim, "dead:"+id)
+			}
+			ctx = metadata.AppendToOutgoingContext(ctx, kv...)
+			m.log.Warnf("SWIM UPDATE SEND → %d death(s) via helper=%s  ids=%s", len(deaths), h.Addr, strings.Join(deaths, ","))
+		}
+
 		conn, err := grpc.DialContext(ctx, h.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		cancel()
 		if err != nil {
+			cancel()
+			m.log.Warnf("SWIM PINGREQ → helper=%s dial fail", h.Addr)
 			continue
 		}
 		cli := proto.NewGossipClient(conn)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), m.timeout)
-		rep, err := cli.PingReq(ctx2, &proto.PingReqRequest{
+
+		m.log.Infof("SWIM PINGREQ → helper=%s target=%s", h.Addr, target.Addr)
+		rep, err := cli.PingReq(ctx, &proto.PingReqRequest{
 			FromId:     m.selfID,
 			TargetAddr: target.Addr,
 			Seq:        m.nextSeq(),
 		})
-		cancel2()
 		_ = conn.Close()
+		cancel()
+
 		if err == nil && rep.Ok {
+			m.log.Infof("SWIM PINGREQ ← helper=%s ok=true", h.Addr)
 			okAny = true
 			break
+		}
+		if err != nil {
+			m.log.Warnf("SWIM PINGREQ ← helper=%s ok=false (%v)", h.Addr, err)
+		} else {
+			m.log.Warnf("SWIM PINGREQ ← helper=%s ok=false", h.Addr)
 		}
 	}
 	return okAny
@@ -224,19 +285,45 @@ func (m *Manager) nextSeq() uint64 {
 	return m.seq
 }
 
-func (m *Manager) tick() {
-	// 1) scadi i SUSPECT → DEAD
+func (m *Manager) markDeath(id string) {
+	m.mu.Lock()
+	m.deathAnnounce[id] = m.clock.NowSim().Add(5 * m.period) // annuncia ~5 tick
+	m.mu.Unlock()
+}
+
+func (m *Manager) collectDeathAnnounces() (ids []string) {
 	now := m.clock.NowSim()
+	m.mu.Lock()
+	for id, until := range m.deathAnnounce {
+		if now.Before(until) {
+			ids = append(ids, id)
+		} else {
+			delete(m.deathAnnounce, id)
+		}
+	}
+	m.mu.Unlock()
+	return
+}
+
+func (m *Manager) tick() {
+	// 1) scadi i SUSPECT → DEAD SENZA tenere il lock durante setStatus (evita lock annidati)
+	now := m.clock.NowSim()
+
+	var toDead []*peerEntry
 	m.mu.Lock()
 	for _, p := range m.peers {
 		if p.Status == Suspect && !p.SuspectDeadline.IsZero() && now.After(p.SuspectDeadline) {
-			p.Status = Dead
-			m.log.Errorf("SWIM SUSPECT→DEAD  peer=%s (%s)  reason=timeout", p.ID, p.Addr)
+			toDead = append(toDead, p)
 		}
 	}
 	m.mu.Unlock()
 
-	// 2) scegli un target
+	for _, p := range toDead {
+		// fuori dal lock: niente deadlock con markDeath()
+		m.setStatus(p, Dead, "timeout")
+	}
+
+	// 2) scegli un target vivo/sospetto
 	target := m.pickTarget()
 	if target == nil {
 		return
@@ -271,10 +358,23 @@ func (m *Manager) tick() {
 		return
 	}
 
-	// 5) niente ack → SUSPECT (o resta tale)
+	// 5) nessun ack: NON resettare la deadline se già SUSPECT
+	m.maybeSetSuspect(target, "no-ack direct+indirect")
+}
+
+// maybeSetSuspect porta a SUSPECT solo se era ALIVE; se è già SUSPECT non tocca la deadline.
+func (m *Manager) maybeSetSuspect(p *peerEntry, reason string) {
 	m.mu.Lock()
-	m.setStatus(target, Suspect, "no-ack direct+indirect")
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	switch p.Status {
+	case Alive:
+		m.setStatus(p, Suspect, reason) // qui la deadline viene impostata una sola volta
+	case Suspect:
+		// non rinfrescare la deadline: lasciamo che il timeout faccia SUSPECT→DEAD
+		m.log.Warnf("SWIM still SUSPECT  peer=%s (%s) reason=%s", p.ID, p.Addr, reason)
+	default:
+		// DEAD: nulla
+	}
 }
 
 func (m *Manager) Start() {
