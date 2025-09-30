@@ -30,6 +30,10 @@ type Advert struct {
 	HasGPU       bool
 	BusyUntilMs  int64
 	LeaveUntilMs int64
+
+	CpuPct8 uint8
+	MemPct8 uint8
+	GpuPct8 uint8 // valido solo se HasGPU=true
 }
 
 type Queue struct {
@@ -44,6 +48,16 @@ type Queue struct {
 	selfBusyUntilMs  int64
 	selfLeaveUntilMs int64
 	paused           int32
+}
+
+func pct8(x float64) uint8 {
+	if x < 0 {
+		return 0
+	}
+	if x > 100 {
+		x = 100
+	}
+	return uint8(x + 0.5)
 }
 
 func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duration) *Queue {
@@ -134,11 +148,9 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	if s == nil || s.NodeId == "" {
 		return
 	}
-
 	if q.IsPaused() {
-		return // niente rumore mentre siamo in pausa
+		return
 	}
-
 	avail := encodeAvail255(s)
 	nowMs := s.TsMs
 	if nowMs == 0 {
@@ -147,7 +159,7 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 	busy := q.getSelfBusyUntilMs()
 	leave := q.getSelfLeaveUntilMs()
 
-	q.Upsert(Advert{
+	a := Advert{
 		NodeId:       s.NodeId,
 		Avail:        avail,
 		CreateMs:     nowMs,
@@ -155,7 +167,13 @@ func (q *Queue) UpsertSelfFromStats(s *proto.Stats) {
 		HasGPU:       s.GpuPct >= 0,
 		BusyUntilMs:  busy,
 		LeaveUntilMs: leave,
-	})
+		CpuPct8:      pct8(s.CpuPct),
+		MemPct8:      pct8(s.MemPct),
+	}
+	if s.GpuPct >= 0 {
+		a.GpuPct8 = pct8(s.GpuPct)
+	}
+	q.Upsert(a)
 }
 
 func (q *Queue) Upsert(a Advert) {
@@ -325,12 +343,13 @@ func encodeAvail255(s *proto.Stats) uint8 {
 	return v
 }
 
-// | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) | leave_until(8) |
+// | nid_len(2) | nid | avail(1) | create(8) | expire(8) | flags(1) | busy_until(8) | leave_until(8) | cpu(1) | mem(1) | gpu(1) |
 func encodeMD(arr []Advert) string {
 	var buf []byte
 	for _, a := range arr {
 		nid := []byte(a.NodeId)
-		tmp := make([]byte, 2+len(nid)+1+8+8+1+8+8)
+		base := 2 + len(nid) + 1 + 8 + 8 + 1 + 8 + 8 + 3
+		tmp := make([]byte, base)
 		binary.BigEndian.PutUint16(tmp[0:2], uint16(len(nid)))
 		copy(tmp[2:2+len(nid)], nid)
 		tmp[2+len(nid)] = byte(a.Avail)
@@ -343,6 +362,10 @@ func encodeMD(arr []Advert) string {
 		tmp[19+len(nid)] = flags
 		binary.BigEndian.PutUint64(tmp[20+len(nid):28+len(nid)], uint64(a.BusyUntilMs))
 		binary.BigEndian.PutUint64(tmp[28+len(nid):36+len(nid)], uint64(a.LeaveUntilMs))
+		// NEW: cpu/mem/gpu (1 byte ciascuno)
+		tmp[36+len(nid)] = a.CpuPct8
+		tmp[37+len(nid)] = a.MemPct8
+		tmp[38+len(nid)] = a.GpuPct8
 		buf = append(buf, tmp...)
 	}
 	return base64.RawStdEncoding.EncodeToString(buf)
@@ -356,7 +379,8 @@ func decodeMD(s string) ([]Advert, error) {
 	out := make([]Advert, 0, 3)
 	for len(b) >= 2 {
 		l := int(binary.BigEndian.Uint16(b[0:2]))
-		if len(b) < 2+l+1+8+8+1+8+8 {
+		need := 2 + l + 1 + 8 + 8 + 1 + 8 + 8 + 3
+		if len(b) < need {
 			break
 		}
 		nid := string(b[2 : 2+l])
@@ -367,6 +391,9 @@ func decodeMD(s string) ([]Advert, error) {
 		hasGPU := (flags & 0x01) != 0
 		busy := int64(binary.BigEndian.Uint64(b[20+l : 28+l]))
 		leave := int64(binary.BigEndian.Uint64(b[28+l : 36+l]))
+		cpu8 := b[36+l]
+		mem8 := b[37+l]
+		gpu8 := b[38+l]
 
 		out = append(out, Advert{
 			NodeId:       nid,
@@ -376,8 +403,11 @@ func decodeMD(s string) ([]Advert, error) {
 			HasGPU:       hasGPU,
 			BusyUntilMs:  busy,
 			LeaveUntilMs: leave,
+			CpuPct8:      cpu8,
+			MemPct8:      mem8,
+			GpuPct8:      gpu8,
 		})
-		b = b[36+l:]
+		b = b[need:]
 	}
 	return out, nil
 }
@@ -414,7 +444,9 @@ func loadPctFromAvail(av uint8) float64 {
 
 // fmtAdvert produce una stringa compatta e leggibile per un advert.
 func (q *Queue) fmtAdvert(a Advert, nowMs int64) string {
+	// load “composito” (max) per retrocompatibilità
 	load := loadPctFromAvail(a.Avail)
+
 	age := time.Duration(nowMs-a.CreateMs) * time.Millisecond
 	ttlRem := time.Duration(a.ExpireMs-nowMs) * time.Millisecond
 	if ttlRem < 0 {
@@ -428,21 +460,26 @@ func (q *Queue) fmtAdvert(a Advert, nowMs int64) string {
 	if leaveRem < 0 {
 		leaveRem = 0
 	}
-
-	// Tag freschezza (conservativo: se age<0 non lo mostriamo)
-	freshTag := "fresh"
-	if age > 0 && ttlRem == 0 {
-		freshTag = "expired"
+	status := "fresh"
+	if a.ExpireMs <= nowMs {
+		status = "expired"
 	}
 
-	return fmt.Sprintf("%s load=%.1f%% age=%s ttl=%s busy=%s leave=%s gpu=%t %s",
+	cpu := float64(a.CpuPct8)
+	mem := float64(a.MemPct8)
+	gpuStr := "-"
+	if a.HasGPU {
+		gpuStr = fmt.Sprintf("%.0f%%", float64(a.GpuPct8))
+	}
+
+	return fmt.Sprintf("%s load=%.1f%% [cpu=%.0f%% mem=%.0f%% gpu=%s] age=%s ttl=%s busy=%s leave=%s %s",
 		a.NodeId,
 		load,
+		cpu, mem, gpuStr,
 		age.Truncate(100*time.Millisecond),
 		ttlRem.Truncate(100*time.Millisecond),
 		busyRem.Truncate(100*time.Millisecond),
 		leaveRem.Truncate(100*time.Millisecond),
-		a.HasGPU,
-		freshTag,
+		status,
 	)
 }

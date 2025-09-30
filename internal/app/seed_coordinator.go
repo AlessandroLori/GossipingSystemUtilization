@@ -473,6 +473,7 @@ func StartSeedCoordinator(
 			}
 
 			ordered := rankCandidatesForJob(clock, job, peers, k, aff, cfg, pbq)
+			logProbeOrder(log, clock, pbq, cfg.FriendsAffinity.StaleCutoffMs, ordered)
 			if len(ordered) == 0 {
 				ordered = samplePeers(peers, k, r)
 				if len(ordered) == 0 {
@@ -569,7 +570,6 @@ func logProbeOrder(
 		return
 	}
 	nowMs := clk.NowSim().UnixMilli()
-
 	lines := make([]string, 0, len(ordered))
 	for i, p := range ordered {
 		av, ok, fresh, busy := pbq.Lookup2(p.NodeId, nowMs, staleCutoffMs)
@@ -589,8 +589,19 @@ func logProbeOrder(
 		if busy > nowMs {
 			busyRem = time.Duration(busy-nowMs) * time.Millisecond
 		}
-		lines = append(lines, fmt.Sprintf("#%d %s load=%.1f%% %s busy=%s addr=%s",
-			i+1, p.NodeId, load, freshTag, busyRem.Truncate(100*time.Millisecond), p.Addr))
+
+		// dettaglio CPU/MEM/GPU dall’ultimo advert se presente
+		detail := ""
+		if a, ok := pbq.Latest(p.NodeId); ok {
+			gpuStr := "-"
+			if a.HasGPU {
+				gpuStr = fmt.Sprintf("%d%%", a.GpuPct8)
+			}
+			detail = fmt.Sprintf(" [cpu=%d%% mem=%d%% gpu=%s]", a.CpuPct8, a.MemPct8, gpuStr)
+		}
+
+		lines = append(lines, fmt.Sprintf("#%d %s load=%.1f%% %s busy=%s addr=%s%s",
+			i+1, p.NodeId, load, freshTag, busyRem.Truncate(100*time.Millisecond), p.Addr, detail))
 	}
 	log.Infof("PROBE ORDER (%d):\n  %s", len(ordered), strings.Join(lines, "\n  "))
 }
@@ -720,7 +731,6 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 }
 
 // rankCandidatesForJob ordina i candidati usando Friends & Reputation.
-// FIX: deduce HasGPU da piggyback e filtra i non-GPU quando il job richiede GPU.
 func rankCandidatesForJob(
 	clock *simclock.Clock,
 	job schedJob,
@@ -731,13 +741,10 @@ func rankCandidatesForJob(
 	pbq *piggyback.Queue,
 ) []*proto.PeerInfo {
 
-	// 1) Classe primaria del job (usa le soglie già impostate all'avvio)
-	class := affinity.GuessClass(job.cpu, job.mem, job.gpu)
-	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.id, class, len(sampled))
+	// Classe primaria del job (0=GEN, 1=CPU, 2=MEM, 3=GPU)
+	jclass := int(affinity.PrimaryClass(job.cpu, job.mem, job.gpu))
+	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.id, jclass, len(sampled))
 
-	requiresGPU := job.gpu > 0.0 // un job con richiesta GPU > 0 richiede effettivamente GPU
-
-	// 2) Prepara mapping id -> PeerInfo e costruisci i Candidate per lo scoring
 	nowMs := clock.NowSim().UnixMilli()
 
 	id2peer := make(map[string]*proto.PeerInfo, len(sampled))
@@ -749,53 +756,82 @@ func rankCandidatesForJob(
 		}
 		id2peer[p.NodeId] = p
 
-		// Defaults "sicuri"
 		hasGPU := true
 		advAvail := -1.0
 		fresh := true
 		penalty := 0.0
-		projected := -1.0 // AE non integrato qui: ignoto
+		projected := -1.0 // 0..1 (basso=meglio), -1 = ignoto
 
 		if pbq != nil {
-			// 2.a) HasGPU dai piggyback advert più recente (se presente)
-			if adv, ok := pbq.Latest(p.NodeId); ok {
-				hasGPU = adv.HasGPU
-			}
-			// 2.b) Avail/Fresh/Penalty via Lookup2
-			if av255, ok, freshPB, busyUntil := pbq.Lookup2(p.NodeId, nowMs, cfg.FriendsAffinity.StaleCutoffMs); ok {
+			// 1) avail/fresh/penalty dal piggyback
+			av255, ok, freshPB, busyUntil := pbq.Lookup2(p.NodeId, nowMs, cfg.FriendsAffinity.StaleCutoffMs)
+			if ok {
 				advAvail = float64(av255) / 255.0
 				fresh = freshPB
 				if busyUntil > nowMs {
-					penalty = 1.0 // binario; peso effettivo = affCfg.WPenalty
+					penalty = 1.0
 				}
 			}
-		}
 
-		// 2.c) Se il job richiede GPU e il peer non ha GPU, scarta subito il candidato
-		if requiresGPU && !hasGPU {
-			continue
+			// 2) CPU/MEM/GPU specifici dall’ultimo advert (se presente, grazie alla patch del piggyback)
+			if a, ok2 := pbq.Latest(p.NodeId); ok2 {
+				if !a.HasGPU {
+					hasGPU = false
+				}
+
+				// scegli la risorsa “driver” a seconda della classe del job
+				var loadPct float64
+				switch jclass {
+				case 1: // CPU_ONLY
+					loadPct = float64(a.CpuPct8)
+				case 2: // MEM_HEAVY
+					loadPct = float64(a.MemPct8)
+				case 3: // GPU_HEAVY
+					if a.HasGPU {
+						loadPct = float64(a.GpuPct8)
+					} else {
+						loadPct = 100 // niente GPU -> trattalo come saturo per job GPU-heavy
+					}
+				default: // GENERAL → usa il max (conservativo)
+					c := float64(a.CpuPct8)
+					m := float64(a.MemPct8)
+					g := 0.0
+					if a.HasGPU {
+						g = float64(a.GpuPct8)
+					}
+					// max manuale senza math.Max
+					loadPct = c
+					if m > loadPct {
+						loadPct = m
+					}
+					if g > loadPct {
+						loadPct = g
+					}
+				}
+				if loadPct < 0 {
+					loadPct = 0
+				}
+				if loadPct > 100 {
+					loadPct = 100
+				}
+				projected = loadPct / 100.0
+			}
 		}
 
 		cands = append(cands, affinity.Candidate{
 			PeerID:          p.NodeId,
 			HasGPU:          hasGPU,
-			AdvertAvail:     advAvail,
-			ProjectedLoad:   projected,
-			CooldownPenalty: penalty,
+			AdvertAvail:     advAvail,  // 0..1 (alto=meglio)
+			ProjectedLoad:   projected, // 0..1 (basso=meglio), -1=ignoto
+			CooldownPenalty: penalty,   // 0 o 1
 			Fresh:           fresh,
 		})
 	}
 
-	// Se dopo il filtro GPU non c'è più nessuno, restituisci la lista originale
-	// per dare comunque una chance (potrebbero esserci job con gpu=0 in mix successivi).
-	if len(cands) == 0 {
-		return sampled
-	}
+	// Rank (passiamo la classe come JobClass, il cast via PrimaryClass è già coerente)
+	scored := aff.Rank(affinity.PrimaryClass(job.cpu, job.mem, job.gpu), cands, topK)
 
-	// 3) Ranking con Friends & Reputation (stampa breakdown P/A/L/Penalty dentro aff.Rank)
-	scored := aff.Rank(class, cands, topK)
-
-	// 4) Ricostruisci la lista di PeerInfo ordinata
+	// ricostruisci PeerInfo ordinati
 	out := make([]*proto.PeerInfo, 0, len(scored))
 	for _, sc := range scored {
 		if pi, ok := id2peer[sc.PeerID]; ok {
