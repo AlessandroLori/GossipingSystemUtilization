@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -482,6 +483,7 @@ func StartSeedCoordinator(
 				}
 				ordered = withJollyCandidate(ordered, peers, r, log)
 			}
+			logProbeOrder(log, clock, pbq, cfg.FriendsAffinity.StaleCutoffMs, ordered)
 
 			// 4) Probe/Commit (+ reputazione)
 			classesForUpdate := []affinity.JobClass{affinity.PrimaryClass(job.cpu, job.mem, job.gpu)}
@@ -554,6 +556,43 @@ func StartSeedCoordinator(
 			}
 		}
 	}()
+}
+
+func logProbeOrder(
+	log *logx.Logger,
+	clk *simclock.Clock,
+	pbq *piggyback.Queue,
+	staleCutoffMs int64,
+	ordered []*proto.PeerInfo,
+) {
+	if log == nil || pbq == nil || len(ordered) == 0 {
+		return
+	}
+	nowMs := clk.NowSim().UnixMilli()
+
+	lines := make([]string, 0, len(ordered))
+	for i, p := range ordered {
+		av, ok, fresh, busy := pbq.Lookup2(p.NodeId, nowMs, staleCutoffMs)
+		load := -1.0
+		if ok {
+			load = (float64(255-int(av)) * 100.0) / 255.0
+		}
+		freshTag := "?"
+		if ok {
+			if fresh {
+				freshTag = "fresh"
+			} else {
+				freshTag = "stale"
+			}
+		}
+		busyRem := time.Duration(0)
+		if busy > nowMs {
+			busyRem = time.Duration(busy-nowMs) * time.Millisecond
+		}
+		lines = append(lines, fmt.Sprintf("#%d %s load=%.1f%% %s busy=%s addr=%s",
+			i+1, p.NodeId, load, freshTag, busyRem.Truncate(100*time.Millisecond), p.Addr))
+	}
+	log.Infof("PROBE ORDER (%d):\n  %s", len(ordered), strings.Join(lines, "\n  "))
 }
 
 func className(i int) string {

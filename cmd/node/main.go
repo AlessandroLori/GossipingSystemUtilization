@@ -1,6 +1,6 @@
 package main
 
-//TODO job mandati anche random per scoprire rete, reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
+//TODO reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
 
 import (
 	crand "crypto/rand"

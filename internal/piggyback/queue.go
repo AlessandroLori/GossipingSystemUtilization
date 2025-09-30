@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -251,16 +252,15 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		if q != nil {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
+				nowMs := q.clock.NowSim().UnixMilli()
 				var summary []string
 				for _, a := range ads {
-					summary = append(summary,
-						fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
-							a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
-					)
+					summary = append(summary, q.fmtAdvert(a, nowMs))
 				}
-				q.log.Infof("PIGGYBACK SEND → attaching %d adverts: %v", len(ads), summary)
+				q.log.Infof("PIGGYBACK SEND → %d adverts:\n  - %s", len(ads), strings.Join(summary, "\n  - "))
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
 			}
+
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
@@ -286,12 +286,12 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					if err != nil || len(arr) == 0 {
 						continue
 					}
-					var summary []string
 					nowMs := q.clock.NowSim().UnixMilli()
+					var summary []string
 					for _, a := range arr {
-						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU))
+						summary = append(summary, q.fmtAdvert(a, nowMs))
 					}
-					q.log.Infof("PIGGYBACK RECV ← received %d adverts: %v", len(arr), summary)
+					q.log.Infof("PIGGYBACK RECV ← %d adverts:\n  - %s", len(arr), strings.Join(summary, "\n  - "))
 					for _, a := range arr {
 						if a.LeaveUntilMs > nowMs {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
@@ -301,6 +301,7 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					}
 				}
 			}
+
 		}
 		return handler(ctx, req)
 	}
@@ -405,3 +406,43 @@ func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail 
 func (q *Queue) Pause()         { atomic.StoreInt32(&q.paused, 1) }
 func (q *Queue) Resume()        { atomic.StoreInt32(&q.paused, 0) }
 func (q *Queue) IsPaused() bool { return atomic.LoadInt32(&q.paused) == 1 }
+
+// loadPctFromAvail: converte avail(0..255) in load% (0..100)
+func loadPctFromAvail(av uint8) float64 {
+	return float64(255-int(av)) * 100.0 / 255.0
+}
+
+// fmtAdvert produce una stringa compatta e leggibile per un advert.
+func (q *Queue) fmtAdvert(a Advert, nowMs int64) string {
+	load := loadPctFromAvail(a.Avail)
+	age := time.Duration(nowMs-a.CreateMs) * time.Millisecond
+	ttlRem := time.Duration(a.ExpireMs-nowMs) * time.Millisecond
+	if ttlRem < 0 {
+		ttlRem = 0
+	}
+	busyRem := time.Duration(a.BusyUntilMs-nowMs) * time.Millisecond
+	if busyRem < 0 {
+		busyRem = 0
+	}
+	leaveRem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
+	if leaveRem < 0 {
+		leaveRem = 0
+	}
+
+	// Tag freschezza (conservativo: se age<0 non lo mostriamo)
+	freshTag := "fresh"
+	if age > 0 && ttlRem == 0 {
+		freshTag = "expired"
+	}
+
+	return fmt.Sprintf("%s load=%.1f%% age=%s ttl=%s busy=%s leave=%s gpu=%t %s",
+		a.NodeId,
+		load,
+		age.Truncate(100*time.Millisecond),
+		ttlRem.Truncate(100*time.Millisecond),
+		busyRem.Truncate(100*time.Millisecond),
+		leaveRem.Truncate(100*time.Millisecond),
+		a.HasGPU,
+		freshTag,
+	)
+}
