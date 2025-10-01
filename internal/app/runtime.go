@@ -296,14 +296,20 @@ func (rt *Runtime) doJoin(prefix string) {
 			TsMs:   rt.Clock.NowSimMs(),
 		},
 	}
-	rep, seedAddr, err := jc.TryJoin(rt.SeedsCSV, req)
+
+	// NEW: contatta almeno 2 seed distinti
+	rep, seedAddrs, err := jc.TryJoinTwo(rt.SeedsCSV, req)
 	if err != nil {
-		rt.Log.Warnf("%s non riuscito: %v", prefix, err)
+		rt.Log.Warnf("%s non riuscito: %v (contattati=%v)", prefix, err, seedAddrs)
 		return
 	}
-	rt.Log.Infof("%s via %s — peers=%d", prefix, seedAddr, len(rep.Peers))
+	rt.Log.Infof("%s via %v — peers=%d", prefix, seedAddrs, len(rep.Peers))
 
-	rt.Mgr.AddPeer("seed@"+seedAddr, seedAddr)
+	// registra peers
+	rt.Mgr.AddPeer("seed@"+seedAddrs[0], seedAddrs[0])
+	if len(seedAddrs) > 1 {
+		rt.Mgr.AddPeer("seed@"+seedAddrs[1], seedAddrs[1])
+	}
 	for _, p := range rep.Peers {
 		rt.Mgr.AddPeer(p.NodeId, p.Addr)
 		rt.Log.Infof("  peer: node_id=%s addr=%s seed=%v", p.NodeId, p.Addr, p.IsSeed)
