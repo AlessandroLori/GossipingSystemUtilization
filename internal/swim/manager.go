@@ -200,12 +200,16 @@ func (m *Manager) pickTarget() *peerEntry {
 }
 
 func (m *Manager) pingOnce(addr string) bool {
+	// gate immediato: se il nodo è "down", niente rete
+	if m.gate != nil && !m.gate() {
+		return false
+	}
+
 	deaths := m.collectDeathAnnounces()
 	ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
 	defer cancel()
 
 	if len(deaths) > 0 {
-		// costruisci coppie (chiave,valore) per AppendToOutgoingContext
 		kv := make([]string, 0, len(deaths)*2)
 		for _, id := range deaths {
 			kv = append(kv, mdKeySwim, "dead:"+id)
@@ -214,12 +218,22 @@ func (m *Manager) pingOnce(addr string) bool {
 		m.log.Warnf("SWIM UPDATE SEND → %d death(s) to=%s  ids=%s", len(deaths), addr, strings.Join(deaths, ","))
 	}
 
+	// ricontrolla gate prima del dial
+	if m.gate != nil && !m.gate() {
+		return false
+	}
+
 	conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 	if err != nil {
 		m.log.Warnf("SWIM PING → to=%s dial fail", addr)
 		return false
 	}
 	defer conn.Close()
+
+	// ricontrolla gate anche dopo il dial (se è sceso nel frattempo)
+	if m.gate != nil && !m.gate() {
+		return false
+	}
 
 	cli := proto.NewGossipClient(conn)
 	m.log.Infof("SWIM PING → to=%s", addr)
@@ -233,12 +247,22 @@ func (m *Manager) pingOnce(addr string) bool {
 }
 
 func (m *Manager) pingReqK(target *peerEntry, helpers []*peerEntry) bool {
+	// gate immediato
+	if m.gate != nil && !m.gate() {
+		return false
+	}
+
 	deaths := m.collectDeathAnnounces()
 	okAny := false
 
 	for i, h := range helpers {
 		if i >= m.indirectK {
 			break
+		}
+
+		// ricontrollo gate ad ogni iterazione
+		if m.gate != nil && !m.gate() {
+			return false
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), m.timeout)
@@ -249,6 +273,12 @@ func (m *Manager) pingReqK(target *peerEntry, helpers []*peerEntry) bool {
 			}
 			ctx = metadata.AppendToOutgoingContext(ctx, kv...)
 			m.log.Warnf("SWIM UPDATE SEND → %d death(s) via helper=%s  ids=%s", len(deaths), h.Addr, strings.Join(deaths, ","))
+		}
+
+		// ricontrolla gate prima del dial
+		if m.gate != nil && !m.gate() {
+			cancel()
+			return false
 		}
 
 		conn, err := grpc.DialContext(ctx, h.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -312,7 +342,12 @@ func (m *Manager) collectDeathAnnounces() (ids []string) {
 }
 
 func (m *Manager) tick() {
-	// 1) scadi i SUSPECT → DEAD SENZA tenere il lock durante setStatus (evita lock annidati)
+	// se il nodo è "down", nessuna attività SWIM
+	if m.gate != nil && !m.gate() {
+		return
+	}
+
+	// 1) scadi i SUSPECT → DEAD SENZA tenere il lock durante setStatus
 	now := m.clock.NowSim()
 
 	var toDead []*peerEntry
@@ -325,11 +360,10 @@ func (m *Manager) tick() {
 	m.mu.Unlock()
 
 	for _, p := range toDead {
-		// fuori dal lock: niente deadlock con markDeath()
 		m.setStatus(p, Dead, "timeout")
 	}
 
-	// 2) scegli un target vivo/sospetto
+	// 2) scegli un target
 	target := m.pickTarget()
 	if target == nil {
 		return
@@ -344,9 +378,8 @@ func (m *Manager) tick() {
 		return
 	}
 
-	// 4) ping indiretto (k helpers)
+	// 4) ping indiretto
 	helpers := m.listCandidates()
-	// rimuovi target dalla lista
 	filter := helpers[:0]
 	for _, h := range helpers {
 		if h.ID != target.ID {
@@ -364,7 +397,7 @@ func (m *Manager) tick() {
 		return
 	}
 
-	// 5) nessun ack: NON resettare la deadline se già SUSPECT
+	// 5) nessun ack
 	m.maybeSetSuspect(target, "no-ack direct+indirect")
 }
 
@@ -390,14 +423,14 @@ func (m *Manager) Start() {
 			case <-m.stopCh:
 				return
 			default:
-				// gate: se il nodo è in leave, SWIM resta silenzioso
-				if m.gate != nil && !m.gate() {
-					m.clock.SleepSim(m.period)
-					continue
-				}
-				m.clock.SleepSim(m.period)
-				m.tick()
 			}
+			// gate: se il nodo è in leave, SWIM resta silenzioso
+			if m.gate != nil && !m.gate() {
+				m.clock.SleepSim(m.period)
+				continue
+			}
+			m.clock.SleepSim(m.period)
+			m.tick()
 		}
 	}()
 }

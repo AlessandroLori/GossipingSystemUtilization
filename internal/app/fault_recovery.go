@@ -1,7 +1,9 @@
 package app
 
 import (
+	"math/rand"
 	mrand "math/rand"
+	"time"
 
 	"GossipSystemUtilization/internal/faults"
 	"GossipSystemUtilization/internal/logx"
@@ -22,33 +24,76 @@ type FaultProfileInput struct {
 func StartFaultRecoveryWithRuntime(
 	log *logx.Logger,
 	clock *simclock.Clock,
-	r *mrand.Rand,
+	r *rand.Rand,
 	in FaultProfileInput,
 	rt *Runtime,
 ) {
-	hooks := faults.Hooks{
-		OnDown: func() {
-			log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
-			// nodeUp=false viene impostato da StopAll()
-			rt.StopAll()
-		},
-		OnUp: func() {
-			log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
-			// nodeUp=true viene impostato da RecoverAll()
-			rt.RecoverAll()
+	if rt == nil || clock == nil || log == nil {
+		return
+	}
+	if in.Enabled == nil || !*in.Enabled {
+		return
+	}
+	printTrans := (in.PrintTransitions != nil && *in.PrintTransitions)
 
-			// Annuncio immediato di recovery: pulisci leave e forza self-advert 'clean'
-			if rt != nil && rt.PBQueue != nil {
-				rt.PBQueue.SetLeaveFor(0)
-				// Usa l'helper già definito in leave_sim.go
-				forceSelfAdvertLeave(rt, rt.Clock, rt.ID, 0)
+	log.Infof("FAULT PROFILE → freq_weights=%v freq_rate_per_min=%v dur_weights=%v dur_mean_s=%v",
+		in.FrequencyClassWeights, in.FrequencyPerMinSim, in.DurationClassWeights, in.DurationMeanSimS)
+
+	go func() {
+		for {
+			// 1) attesa simulata prima del fault
+			freqClass := pickKeyWeighted(r, in.FrequencyClassWeights)
+			ratePerMin := in.FrequencyPerMinSim[freqClass]
+			waitSim := 999999.0
+			if ratePerMin > 0 {
+				waitSim = (r.ExpFloat64() / ratePerMin) * 60.0
+			}
+			if waitSim > 1e8 {
+				waitSim = 60.0
+			}
+			clock.SleepSim(time.Duration(waitSim * float64(time.Second)))
+
+			// 2) durata fault
+			durClass := pickKeyWeighted(r, in.DurationClassWeights)
+			meanS := in.DurationMeanSimS[durClass]
+			if meanS <= 0 {
+				meanS = 8
+			}
+			durS := meanS * (0.7 + 0.6*r.Float64())
+			dur := time.Duration(durS * float64(time.Second))
+
+			// === CRASH (stop immediato rete) ===
+			nodeUp.Store(false)
+			if printTrans {
+				log.Warnf("FAULTS → DOWN")
+				log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
 			}
 
-			// Riallinea membership se necessario (utile sui peer non-seed)
-			rt.TryJoinIfNeeded()
-		},
-	}
-	StartFaultRecovery(log, clock, r, in, hooks)
+			// blocco duro piggyback e servizi
+			if rt.PBQueue != nil {
+				rt.PBQueue.SetSendEnabled(false)
+				rt.PBQueue.SetRecvEnabled(false)
+				rt.PBQueue.Pause()
+			}
+			rt.StopAll() // spegne SWIM/AE/Reporter/gRPC
+
+			// attesa crash
+			clock.SleepSim(dur)
+
+			// === Recovery ===
+			if printTrans {
+				log.Warnf("FAULTS → UP")
+				log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AntiEntropy + Reporter + gRPC")
+			}
+			// riattiva piggyback prima di far ripartire i servizi
+			if rt.PBQueue != nil {
+				rt.PBQueue.Resume()
+				rt.PBQueue.SetSendEnabled(true)
+				rt.PBQueue.SetRecvEnabled(true)
+			}
+			rt.RecoverAll()
+		}
+	}()
 }
 
 // Versione generica riutilizzabile con Hooks esterni

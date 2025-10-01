@@ -105,12 +105,16 @@ func (rt *Runtime) QuiesceForLeave() {
 		rt.Mgr = nil
 	}
 
-	// NOTA: NON mettiamo in pausa la PBQueue qui, serve per gli avvisi.
+	// La PBQueue resta attiva per l'annuncio leave.
+	// Il gating della RECV lo fai in leave_sim.go (SetRecvEnabled(false) prima dell'annuncio).
 }
 
 // FinalizeLeaveStop: dopo gli avvisi, freddiamo anche la PBQueue.
 func (rt *Runtime) FinalizeLeaveStop() {
 	if rt.PBQueue != nil {
+		// Dopo l'annuncio: freddiamo completamente la PBQueue
+		rt.PBQueue.SetSendEnabled(false)
+		rt.PBQueue.SetRecvEnabled(false)
 		rt.PBQueue.Pause()
 	}
 }
@@ -162,8 +166,16 @@ func (rt *Runtime) StartAll() error {
 		},
 		rt.Rng,
 		rt.PBQueue,
-		IsNodeUp, // <— passa la gate anche al server
+		IsNodeUp,
 	)
+
+	// Riapri completamente la PBQueue
+	if rt.PBQueue != nil {
+		rt.PBQueue.Resume()
+		rt.PBQueue.SetSendEnabled(true)
+		rt.PBQueue.SetRecvEnabled(true)
+	}
+
 	nodeUp.Store(true)
 	return err
 }
@@ -171,8 +183,10 @@ func (rt *Runtime) StartAll() error {
 func (rt *Runtime) StopAll() {
 	nodeUp.Store(false)
 
-	// Congela piggyback: non attaccare/accettare più metadati da ora in poi.
+	// Congela piggyback
 	if rt.PBQueue != nil {
+		rt.PBQueue.SetSendEnabled(false)
+		rt.PBQueue.SetRecvEnabled(false)
 		rt.PBQueue.Pause()
 	}
 
@@ -187,24 +201,27 @@ func (rt *Runtime) StopAll() {
 	// Chiudi l'esposizione di RPC in ingresso
 	grpcserver.Stop(rt.GRPC, rt.Listener, rt.Log)
 
-	// Ferma SWIM (niente più ping/pingreq)
+	// Ferma SWIM
 	if rt.Mgr != nil {
 		rt.Mgr.Stop()
 	}
 
-	// azzera i riferimenti per evitare doppi Stop su stessa istanza
+	// azzera i riferimenti
 	rt.GRPC = nil
 	rt.Listener = nil
 	rt.Reporter = nil
 	rt.Engine = nil
 	rt.Mgr = nil
-	// PBQueue e Store restano (persistono tra recovery)
 }
 
 func (rt *Runtime) RecoverAll() {
+	// PBQueue di nuovo attiva
 	if rt.PBQueue != nil {
 		rt.PBQueue.Resume()
+		rt.PBQueue.SetSendEnabled(true)
+		rt.PBQueue.SetRecvEnabled(true)
 	}
+
 	nodeUp.Store(true)
 
 	swimCfg := swim.Config{PeriodSimS: 1.0, TimeoutRealMs: 250, IndirectK: 3, SuspicionTimeoutS: 6.0}
@@ -236,7 +253,7 @@ func (rt *Runtime) RecoverAll() {
 		},
 		rt.Rng,
 		rt.PBQueue,
-		IsNodeUp, // <— gate
+		IsNodeUp,
 	)
 	if err != nil {
 		rt.Log.Errorf("startGRPCServer (recovery) failed: %v", err)

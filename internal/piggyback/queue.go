@@ -48,7 +48,13 @@ type Queue struct {
 
 	selfBusyUntilMs  int64
 	selfLeaveUntilMs int64
-	paused           int32
+
+	// Pausa "hard" (usata in fault/leave pieno)
+	paused int32
+
+	// Gating fine-grained per leave: disabilita separatamente send/recv piggyback.
+	recvEnabled int32 // 1=on  0=off
+	sendEnabled int32 // 1=on  0=off
 }
 
 func pct8(x float64) uint8 {
@@ -68,13 +74,17 @@ func NewQueue(log *logx.Logger, clock *simclock.Clock, max int, ttl time.Duratio
 	if ttl <= 0 {
 		ttl = 110 * time.Second
 	}
-	return &Queue{
+	q := &Queue{
 		log:   log,
 		clock: clock,
 		max:   max,
 		ttl:   ttl,
 		data:  make(map[string]Advert),
 	}
+	// abilita di default invio/ricezione
+	atomic.StoreInt32(&q.recvEnabled, 1)
+	atomic.StoreInt32(&q.sendEnabled, 1)
+	return q
 }
 
 func (q *Queue) SetBusyFor(d time.Duration) {
@@ -262,9 +272,11 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		if q != nil && !q.IsPaused() {
+		// === PRE-CALL: allega adverts (se consentito) ===
+		if q != nil && !q.IsPaused() && q.SendEnabled() {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
+				// log compatibile con esistente
 				var summary []string
 				for _, a := range ads {
 					summary = append(summary,
@@ -272,14 +284,13 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 							a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
 					)
 				}
-				// target (addr) se disponibile
 				target := ""
 				if cc != nil {
 					target = cc.Target()
 				}
 				q.log.Infof("PIGGYBACK SEND → to=%s attaching %d adverts: %v", target, len(ads), summary)
 
-				// Log esplicito delle LEAVE che stiamo propagando ora
+				// extra log per LEAVE in corso
 				nowMs := q.clock.NowSim().UnixMilli()
 				var leaves []string
 				for _, a := range ads {
@@ -295,7 +306,53 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
 			}
 		}
-		return invoker(ctx, method, req, reply, cc, opts...)
+
+		// === CALL ===
+		err := invoker(ctx, method, req, reply, cc, opts...)
+
+		// === POST-CALL: applica adverts ricevuti (se consentito) ===
+		if q != nil {
+			// in leave/fault "hard" → rifiuta
+			if q.IsPaused() {
+				return err
+			}
+			// gating fine: durante leave annuncio, disabilitiamo la RECV
+			if !q.RecvEnabled() {
+				return err
+			}
+			if md, ok := metadata.FromIncomingContext(ctx); ok {
+				vals := md.Get(mdKey)
+				for _, v := range vals {
+					arr, decErr := decodeMD(v)
+					if decErr != nil || len(arr) == 0 {
+						continue
+					}
+					from := ""
+					if p, okp := peer.FromContext(ctx); okp && p != nil && p.Addr != nil {
+						from = p.Addr.String()
+					}
+
+					var summary []string
+					nowMs := q.clock.NowSim().UnixMilli()
+					for _, a := range arr {
+						summary = append(summary,
+							fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
+								a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+						)
+					}
+					q.log.Infof("PIGGYBACK RECV ← from=%s received %d adverts: %v", from, len(arr), summary)
+
+					for _, a := range arr {
+						if a.LeaveUntilMs > nowMs {
+							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
+							q.log.Warnf("LEAVE UPDATE RECV ← from=%s node=%s remain≈%s", from, a.NodeId, rem.Truncate(100*time.Millisecond))
+						}
+						q.Upsert(a)
+					}
+				}
+			}
+		}
+		return err
 	}
 }
 
@@ -457,6 +514,23 @@ func (q *Queue) Lookup2(nodeID string, nowMs int64, staleCutoffMs int64) (avail 
 func (q *Queue) Pause()         { atomic.StoreInt32(&q.paused, 1) }
 func (q *Queue) Resume()        { atomic.StoreInt32(&q.paused, 0) }
 func (q *Queue) IsPaused() bool { return atomic.LoadInt32(&q.paused) == 1 }
+
+func (q *Queue) SetRecvEnabled(v bool) {
+	if v {
+		atomic.StoreInt32(&q.recvEnabled, 1)
+	} else {
+		atomic.StoreInt32(&q.recvEnabled, 0)
+	}
+}
+func (q *Queue) SetSendEnabled(v bool) {
+	if v {
+		atomic.StoreInt32(&q.sendEnabled, 1)
+	} else {
+		atomic.StoreInt32(&q.sendEnabled, 0)
+	}
+}
+func (q *Queue) RecvEnabled() bool { return atomic.LoadInt32(&q.recvEnabled) == 1 }
+func (q *Queue) SendEnabled() bool { return atomic.LoadInt32(&q.sendEnabled) == 1 }
 
 // loadPctFromAvail: converte avail(0..255) in load% (0..100)
 func loadPctFromAvail(av uint8) float64 {

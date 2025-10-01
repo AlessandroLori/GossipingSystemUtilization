@@ -1,6 +1,29 @@
 package main
 
 //TODO reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
+//TODO unificare tempo di simulazione dei nodi (?)
+//TODO dopo fault fa leave recovery a caso, printare la struct che ogni nodo detiene di ogni altro nodoÙ
+
+/* CHIEDERE CHAT SE È NORMALE CHE FA AVAIL AGED-OUT E AVAIL UPDATE:
+2025/09/30 18:48:08 [01:04:35.537] [node-81bbbc8d91e1] [INFO] LEAVE(local) → for 37.696378429s (until=313233)
+2025/09/30 18:48:08 [01:04:35.538] [node-81bbbc8d91e1] [INFO] PIGGYBACK UPSERT → node=node-81bbbc8d91e1 avail=23
+2025/09/30 18:48:08 [01:04:35.538] [node-81bbbc8d91e1] [WARN] Reporter stopped
+2025/09/30 18:48:08 [01:04:35.540] [node-81bbbc8d91e1] [WARN] Anti-Entropy engine stopped
+2025/09/30 18:48:08 [01:04:35.558] [node-81bbbc8d91e1] [WARN] gRPC fermato (server e listener chiusi)
+2025/09/30 18:48:08 [01:04:35.559] [node-81bbbc8d91e1] [WARN] LEAVE → DOWN (graceful) — duration=37.6s
+2025/09/30 18:48:08 [01:04:35.841] [node-81bbbc8d91e1] [WARN] AVAIL AGED-OUT → node-01c830763480
+2025/09/30 18:48:08 [01:04:35.843] [node-81bbbc8d91e1] [WARN] AVAIL AGED-OUT → node-5e0dba08f38d
+2025/09/30 18:48:08 [01:04:35.843] [node-81bbbc8d91e1] [WARN] AVAIL AGED-OUT → node-81bbbc8d91e1
+2025/09/30 18:48:08 [01:04:35.844] [node-81bbbc8d91e1] [WARN] AVAIL AGED-OUT → node-026d15dcff79
+2025/09/30 18:48:08 [01:04:35.844] [node-81bbbc8d91e1] [WARN] AVAIL AGED-OUT → node-b49883b0230c
+2025/09/30 18:48:08 [01:04:35.845] [node-81bbbc8d91e1] [WARN] GOSSIP AGE-OUT removed=5
+2025/09/30 18:48:08 [01:04:36.387] [node-81bbbc8d91e1] [INFO] AVAIL UPDATE → node-5e0dba08f38d cpu=89.0% mem=15.0% gpu=20.0% ts=293326
+2025/09/30 18:48:08 [01:04:36.389] [node-81bbbc8d91e1] [INFO] AVAIL UPDATE → node-026d15dcff79 cpu=22.0% mem=14.2% gpu=52.9% ts=295604
+2025/09/30 18:48:08 [01:04:36.389] [node-81bbbc8d91e1] [INFO] AVAIL UPDATE → node-b49883b0230c cpu=90.7% mem=63.3% gpu=8.5% ts=251035
+2025/09/30 18:48:08 [01:04:36.389] [node-81bbbc8d91e1] [INFO] AVAIL UPDATE → node-01c830763480 cpu=38.2% mem=20.3% gpu=12.9% ts=279891
+2025/09/30 18:48:08 [01:04:36.390] [node-81bbbc8d91e1] [INFO] AVAIL UPDATE → node-81bbbc8d91e1 cpu=30.3% mem=65.6% gpu=91.1% ts=275257
+2025/09/30 18:48:08 [01:04:36.390] [node-81bbbc8d91e1] [INFO] GOSSIP EXCHANGE ← 127.0.0.1:9003  updated=5
+*/
 
 import (
 	crand "crypto/rand"
