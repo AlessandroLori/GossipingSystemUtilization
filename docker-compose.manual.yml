@@ -1,0 +1,9 @@
+services:
+  seed1:
+    entrypoint: ["sh","-lc","sleep infinity"]
+  seed2:
+    entrypoint: ["sh","-lc","sleep infinity"]
+  seed3:
+    entrypoint: ["sh","-lc","sleep infinity"]
+  peer:
+    entrypoint: ["sh","-lc","sleep infinity"]

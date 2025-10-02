@@ -1,0 +1,66 @@
+name: gossipsystutil
+
+networks:
+  gossipnet:
+    name: gossipnet
+
+x-node-image: &node
+  image: gossip-node:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  networks: [gossipnet]
+  restart: unless-stopped
+
+services:
+  seed1:
+    <<: *node
+    container_name: seed1
+    environment:
+      IS_SEED: "true"
+      PORT: "9001"
+      CONFIG_PATH: /app/config.json
+      GRPC_ADDR: "seed1:9001"
+      SEEDS: "seed1:9001,seed2:9004,seed3:9006"
+    ports:
+      - "9001:9001"
+
+  seed2:
+    <<: *node
+    container_name: seed2
+    environment:
+      IS_SEED: "true"
+      PORT: "9004"
+      CONFIG_PATH: /app/config.json
+      GRPC_ADDR: "seed2:9004"
+      SEEDS: "seed1:9001,seed2:9004,seed3:9006"
+    ports:
+      - "9004:9004"
+
+  seed3:
+    <<: *node
+    container_name: seed3
+    environment:
+      IS_SEED: "true"
+      PORT: "9006"
+      CONFIG_PATH: /app/config.json
+      GRPC_ADDR: "seed3:9006"
+      SEEDS: "seed1:9001,seed2:9004,seed3:9006"
+    ports:
+      - "9006:9006"
+
+  peer:
+    <<: *node
+    # niente container_name: così possiamo scalarlo
+    depends_on:
+      seed1: { condition: service_started }
+      seed2: { condition: service_started }
+      seed3: { condition: service_started }
+    environment:
+      IS_SEED: "false"
+      PORT: "9002"                # stessa porta interna per tutte le repliche
+      CONFIG_PATH: /app/config.json
+      SEEDS: "seed1:9001"
+      #,seed2:9004"
+      #,seed3:9006"
+    # nessuna ports: i peer sono raggiungibili solo sulla rete docker

@@ -1,91 +1,98 @@
-# ===== Makefile per GossipSystemUtilization =====
-SHELL := /bin/bash
+# --- Variabili ---
+COMPOSE := docker compose
+BASE := -f docker-compose.yml
+MANUAL := -f docker-compose.yml -f docker-compose.manual.yml
+PEER_SCALE ?= 1
+SEEDS := seed1 seed2 seed3
 
-GO      := go
-PROTOC  := protoc
-GOPATH  := $(shell $(GO) env GOPATH)
+# --- Phony ---
+.PHONY: build build-nocache up up-auto up-manual ps logs logs-% stop down clean \
+        sh-seed1 sh-seed2 sh-seed3 sh-peer% \
+        start-seed1 start-seed2 start-seed3 start-peer% start-peers start-seeds \
+        restart restart-%
 
-# Plugin protoc (installati con: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-#                                     go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest)
-PROTOC_GEN_GO       := $(GOPATH)/bin/protoc-gen-go
-PROTOC_GEN_GO_GRPC  := $(GOPATH)/bin/protoc-gen-go-grpc
-
-# Proto
-PROTO_DIR := proto
-PROTO_SRC := $(PROTO_DIR)/gossip.proto
-PROTO_GEN := $(PROTO_DIR)/gossip.pb.go $(PROTO_DIR)/gossip_grpc.pb.go
-
-# Parametri di run (override da CLI: make run-peer BOOT=30 PEER_ADDR=127.0.0.1:9002 SEEDS=127.0.0.1:9001)
-CONFIG    ?= ./config.json
-ADDR      ?= 127.0.0.1:9001
-PEER_ADDR ?= 127.0.0.1:9002
-SEEDS     ?= 127.0.0.1:9001
-BOOT      ?= 0
-
-.PHONY: all proto build clean tidy fmt vet regen check-plugins check-proto run-seed run-peer doctor
-
-## Default: pulisci mod, genera .pb.go e builda
-all: tidy proto build
-
-## Verifica che protoc e plugin siano presenti
-check-plugins:
-	@command -v $(PROTOC) >/dev/null || { echo "ERR: protoc non trovato nel PATH"; exit 1; }
-	@test -x "$(PROTOC_GEN_GO)" || { echo "ERR: protoc-gen-go non trovato a $(PROTOC_GEN_GO)"; exit 1; }
-	@test -x "$(PROTOC_GEN_GO_GRPC)" || { echo "ERR: protoc-gen-go-grpc non trovato a $(PROTOC_GEN_GO_GRPC)"; exit 1; }
-
-## Rigenera i file gRPC dal .proto (output dentro ./proto)
-proto: check-plugins
-	@echo ">> Rigenero stubs gRPC"
-	@rm -f $(PROTO_GEN)
-	@$(PROTOC) -I $(PROTO_DIR) \
-	  --plugin=protoc-gen-go="$(PROTOC_GEN_GO)" \
-	  --plugin=protoc-gen-go-grpc="$(PROTOC_GEN_GO_GRPC)" \
-	  --go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
-	  --go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
-	  $(PROTO_SRC)
-	@$(MAKE) check-proto
-
-## Controllo di qualità sui file generati
-check-proto:
-	@grep -q 'type AvailBatch' $(PROTO_DIR)/gossip.pb.go || { echo "ERR: AvailBatch mancante in gossip.pb.go"; exit 1; }
-	@grep -q 'ExchangeAvail(context' $(PROTO_DIR)/gossip_grpc.pb.go || { echo "ERR: ExchangeAvail mancante in gossip_grpc.pb.go"; exit 1; }
-	@echo ">> proto OK"
-
-## Pulizia cache Go e file generati
-clean:
-	@echo ">> Pulizia cache e file generati"
-	@rm -f $(PROTO_GEN)
-	@$(GO) clean -cache -testcache
-
-## Pulizia + rigenerazione .proto
-regen: clean proto
-
-## Mod tidy/fmt/vet
-tidy:
-	$(GO) mod tidy
-
-fmt:
-	$(GO) fmt ./...
-
-vet:
-	$(GO) vet ./...
-
-## Build progetto
+# --- BUILD: solo immagini, non avvia nulla ---
 build:
-	$(GO) build ./...
+	$(COMPOSE) build
 
-## Avvio seed
-run-seed:
-	CONFIG_PATH=$(CONFIG) GRPC_ADDR=$(ADDR) IS_SEED=true SEEDS= BOOT_DELAY_SIM_S=$(BOOT) $(GO) run ./cmd/node
+build-nocache:
+	$(COMPOSE) build --no-cache
 
-## Avvio peer
-run-peer:
-	CONFIG_PATH=$(CONFIG) GRPC_ADDR=$(PEER_ADDR) IS_SEED=false SEEDS=$(SEEDS) BOOT_DELAY_SIM_S=$(BOOT) $(GO) run ./cmd/node
+# --- UP AUTOMATICO: i container partono e l'app si avvia (ENTRYPOINT) ---
+up:
+	$(COMPOSE) $(BASE) up -d --scale peer=$(PEER_SCALE)
 
-## Controlli rapidi: import sbagliati che spesso rompono i tipi generati
-doctor:
-	@echo ">> Doctor: controllo import 'google.golang.org/protobuf/proto' in file che devono usare il tuo 'proto'"
-	@! grep -R --line-number 'google.golang.org/protobuf/proto' internal/antientropy internal/seed internal/swim 2>/dev/null || { echo "ATTENZIONE: rimuovi quell'import o rinominalo (es. goproto)"; exit 1; }
-	@echo ">> Doctor: controllo duplicati di gossip*_pb.go fuori da ./proto"
-	@! find . -type f -name 'gossip*_pb.go' -not -path './proto/*' -print | grep . && { echo "ATTENZIONE: rimuovi i duplicati indicati sopra"; exit 1; } || true
-	@echo ">> Doctor OK"
+# alias
+up-auto: up
+
+# --- UP MANUALE: container accesi ma senza app (sleep infinity da override) ---
+up-manual:
+	$(COMPOSE) $(MANUAL) up -d --scale peer=$(PEER_SCALE)
+
+# --- Stato & Log ---
+ps:
+	$(COMPOSE) ps
+
+logs:
+	$(COMPOSE) logs -f
+
+logs-%:
+	$(COMPOSE) logs -f $*
+
+# --- Stop / Down / Clean ---
+stop:
+	$(COMPOSE) stop
+
+down:
+	$(COMPOSE) down --remove-orphans
+
+clean:
+	$(COMPOSE) down -v --remove-orphans
+	docker image prune -f
+
+restart:
+	$(COMPOSE) restart
+
+restart-%:
+	$(COMPOSE) restart $*
+
+# --- Shell nei container ---
+sh-seed1:
+	$(COMPOSE) exec seed1 sh
+sh-seed2:
+	$(COMPOSE) exec seed2 sh
+sh-seed3:
+	$(COMPOSE) exec seed3 sh
+# per i peer scalati: sh-peer1, sh-peer2, ...
+sh-peer%:
+	$(COMPOSE) exec --index $* peer sh
+
+# --- AVVIO MANUALE DELL’APP DENTRO I CONTAINER ---
+# evita doppio avvio (porta occupata) se già in esecuzione
+start-seed1:
+	$(COMPOSE) exec seed1 sh -lc 'pgrep -x node >/dev/null && echo "[seed1] già in esecuzione" || exec /app/entrypoint.sh'
+
+start-seed2:
+	$(COMPOSE) exec seed2 sh -lc 'pgrep -x node >/dev/null && echo "[seed2] già in esecuzione" || exec /app/entrypoint.sh'
+
+start-seed3:
+	$(COMPOSE) exec seed3 sh -lc 'pgrep -x node >/dev/null && echo "[seed3] già in esecuzione" || exec /app/entrypoint.sh'
+
+# Avvia un peer specifico per indice: es. "make start-peer-2"
+start-peer-%:
+	$(COMPOSE) exec --index $* peer sh -lc 'pgrep -x node >/dev/null && echo "[peer-$*] già in esecuzione" || exec /app/entrypoint.sh'
+
+# Avvia tutti i seed dichiarati sopra
+start-seeds:
+	@for s in $(SEEDS); do \
+		echo ">> Avvio $$s"; \
+		$(COMPOSE) exec $$s sh -lc 'pgrep -x node >/dev/null && echo "[$$s] già in esecuzione" || exec /app/entrypoint.sh'; \
+	done
+
+# Avvia tutti i peer presenti (1..PEER_SCALE)
+start-peers:
+	@i=1; while [ $$i -le $(PEER_SCALE) ]; do \
+	  echo ">> Avvio peer $$i"; \
+	  $(COMPOSE) exec --index $$i peer sh -lc 'pgrep -x node >/dev/null && echo "[peer-$$i] già in esecuzione" || exec /app/entrypoint.sh'; \
+	  i=$$((i+1)); \
+	done

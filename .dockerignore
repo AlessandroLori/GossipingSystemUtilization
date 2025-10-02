@@ -1,0 +1,21 @@
+# Go
+bin/
+build/
+dist/
+*.test
+*.out
+
+# VCS & editor
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# Node / misc
+node_modules/
+*.log
+
+# Docker
+Dockerfile
+docker-compose.yml
