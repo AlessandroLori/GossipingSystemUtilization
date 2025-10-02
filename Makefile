@@ -2,14 +2,20 @@
 COMPOSE := docker compose
 BASE := -f docker-compose.yml
 MANUAL := -f docker-compose.yml -f docker-compose.manual.yml
-PEER_SCALE ?= 1
+
+# Elenca qui i servizi peer che hai nel compose:
+PEERS := peer1 peer2 peer3 peer4 peer5 peer6 peer7 peer8 peer9 peer10 peer11 peer12 peer13 peer14 peer15 peer16
 SEEDS := seed1 seed2 seed3
 
+# (opzionale) se nel compose hai un "name:" diverso, aggiornalo qui
+PROJECT := gossipsystutil
+
 # --- Phony ---
-.PHONY: build build-nocache up up-auto up-manual ps logs logs-% stop down clean \
-        sh-seed1 sh-seed2 sh-seed3 sh-peer% \
-        start-seed1 start-seed2 start-seed3 start-peer% start-peers start-seeds \
-        restart restart-%
+.PHONY: build build-nocache up up-auto up-manual up-seeds up-peers \
+        ps logs logs-% logs-peer-% \
+        stop stop-seeds stop-peers down clean restart restart-% \
+        sh-% sh-peer-% \
+        start-% start-seeds start-peers start-all
 
 # --- BUILD: solo immagini, non avvia nulla ---
 build:
@@ -18,30 +24,50 @@ build:
 build-nocache:
 	$(COMPOSE) build --no-cache
 
-# --- UP AUTOMATICO: i container partono e l'app si avvia (ENTRYPOINT) ---
+# --- UP AUTOMATICO (ENTRYPOINT attivo) ---
+# Avvia TUTTI i servizi elencati (seeds + peers)
 up:
-	$(COMPOSE) $(BASE) up -d --scale peer=$(PEER_SCALE)
+	$(COMPOSE) $(BASE) up -d $(SEEDS) $(PEERS)
 
 # alias
 up-auto: up
 
-# --- UP MANUALE: container accesi ma senza app (sleep infinity da override) ---
+# --- UP MANUALE (override con sleep infinity) ---
 up-manual:
-	$(COMPOSE) $(MANUAL) up -d --scale peer=$(PEER_SCALE)
+	$(COMPOSE) $(MANUAL) up -d $(SEEDS) $(PEERS)
+
+# Solo seeds / solo peers (comodo se vuoi avviarli in fasi)
+up-seeds:
+	$(COMPOSE) $(BASE) up -d $(SEEDS)
+
+up-peers:
+	$(COMPOSE) $(BASE) up -d $(PEERS)
 
 # --- Stato & Log ---
 ps:
 	$(COMPOSE) ps
 
-logs:
-	$(COMPOSE) logs -f
-
+# log di un servizio qualsiasi (es. make logs-seed1, logs-peer7)
 logs-%:
 	$(COMPOSE) logs -f $*
+
+# log di un peer per indice numerico: make logs-peer-7 -> servizio "peer7"
+logs-peer-%:
+	$(COMPOSE) logs -f peer$*
+
+# tutti i log
+logs:
+	$(COMPOSE) logs -f
 
 # --- Stop / Down / Clean ---
 stop:
 	$(COMPOSE) stop
+
+stop-seeds:
+	$(COMPOSE) stop $(SEEDS)
+
+stop-peers:
+	$(COMPOSE) stop $(PEERS)
 
 down:
 	$(COMPOSE) down --remove-orphans
@@ -57,42 +83,30 @@ restart-%:
 	$(COMPOSE) restart $*
 
 # --- Shell nei container ---
-sh-seed1:
-	$(COMPOSE) exec seed1 sh
-sh-seed2:
-	$(COMPOSE) exec seed2 sh
-sh-seed3:
-	$(COMPOSE) exec seed3 sh
-# per i peer scalati: sh-peer1, sh-peer2, ...
-sh-peer%:
-	$(COMPOSE) exec --index $* peer sh
+# shell su un servizio qualsiasi (seed1, peer7, ecc.)
+sh-%:
+	$(COMPOSE) exec $* sh
+
+# shell su peer per indice numerico: make sh-peer-7 -> "peer7"
+sh-peer-%:
+	$(COMPOSE) exec peer$* sh
 
 # --- AVVIO MANUALE DELL’APP DENTRO I CONTAINER ---
-# evita doppio avvio (porta occupata) se già in esecuzione
-start-seed1:
-	$(COMPOSE) exec seed1 sh -lc 'pgrep -x node >/dev/null && echo "[seed1] già in esecuzione" || exec /app/entrypoint.sh'
+# usa pgrep/pidof per evitare doppi avvii; se non gira, esegue l'entrypoint
 
-start-seed2:
-	$(COMPOSE) exec seed2 sh -lc 'pgrep -x node >/dev/null && echo "[seed2] già in esecuzione" || exec /app/entrypoint.sh'
+start-%:
+	$(COMPOSE) exec $* sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$*] già in esecuzione" || exec /app/entrypoint.sh'
 
-start-seed3:
-	$(COMPOSE) exec seed3 sh -lc 'pgrep -x node >/dev/null && echo "[seed3] già in esecuzione" || exec /app/entrypoint.sh'
-
-# Avvia un peer specifico per indice: es. "make start-peer-2"
-start-peer-%:
-	$(COMPOSE) exec --index $* peer sh -lc 'pgrep -x node >/dev/null && echo "[peer-$*] già in esecuzione" || exec /app/entrypoint.sh'
-
-# Avvia tutti i seed dichiarati sopra
 start-seeds:
 	@for s in $(SEEDS); do \
-		echo ">> Avvio $$s"; \
-		$(COMPOSE) exec $$s sh -lc 'pgrep -x node >/dev/null && echo "[$$s] già in esecuzione" || exec /app/entrypoint.sh'; \
+	  echo ">> Avvio $$s"; \
+	  $(COMPOSE) exec $$s sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$$s] già in esecuzione" || exec /app/entrypoint.sh'; \
 	done
 
-# Avvia tutti i peer presenti (1..PEER_SCALE)
 start-peers:
-	@i=1; while [ $$i -le $(PEER_SCALE) ]; do \
-	  echo ">> Avvio peer $$i"; \
-	  $(COMPOSE) exec --index $$i peer sh -lc 'pgrep -x node >/dev/null && echo "[peer-$$i] già in esecuzione" || exec /app/entrypoint.sh'; \
-	  i=$$((i+1)); \
+	@for p in $(PEERS); do \
+	  echo ">> Avvio $$p"; \
+	  $(COMPOSE) exec $$p sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$$p] già in esecuzione" || exec /app/entrypoint.sh'; \
 	done
+
+start-all: start-seeds start-peers

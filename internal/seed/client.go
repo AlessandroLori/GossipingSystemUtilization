@@ -66,81 +66,106 @@ func (c *JoinClient) TryJoin(seedsCSV string, req *proto.JoinRequest) (*proto.Jo
 }
 
 // === NEW: JOIN con almeno 2 seed distinti; merge di peers/stats ===
+// === JOIN "fino a due" seed distinti (ora accetta anche 1 seed) ===
 func (c *JoinClient) TryJoinTwo(seedsCSV string, req *proto.JoinRequest) (*proto.JoinReply, []string, error) {
+	// parse & normalizza
 	all := strings.Split(seedsCSV, ",")
 	seeds := make([]string, 0, len(all))
+	seen := make(map[string]struct{}, len(all))
 	for _, s := range all {
 		s = strings.TrimSpace(s)
-		if s != "" {
-			seeds = append(seeds, s)
+		if s == "" {
+			continue
 		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		seeds = append(seeds, s)
 	}
-	if len(seeds) < 2 {
-		return nil, nil, fmt.Errorf("TryJoinTwo richiede almeno 2 seed in SEEDS")
+	if len(seeds) < 1 {
+		return nil, nil, fmt.Errorf("TryJoinTwo: nessun seed valido in SEEDS (serve almeno 1)")
 	}
 
-	// proveremo più volte a raccogliere 2 successi da seed distinti
+	// obiettivo: 2 successi se disponibili, altrimenti 1 se c'è un solo seed
+	target := 2
+	if len(seeds) == 1 {
+		target = 1
+	}
+
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
-	delaySim := 0.5
+	delaySim := 0.5 // secondi SIM
 	successAddrs := []string{}
 	peersByID := map[string]*proto.PeerInfo{}
 	statsByID := map[string]*proto.Stats{}
 
 	tryOne := func(addr string) bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		conn, err := grpc.DialContext(ctx, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		cancel()
+		// salta se già riuscito con questo seed
+		if slices.Contains(successAddrs, addr) {
+			return false
+		}
+
+		// connessione gRPC al seed
+		ctxDial, cancelDial := context.WithTimeout(context.Background(), 2*time.Second)
+		conn, err := grpc.DialContext(ctxDial, addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+		cancelDial()
 		if err != nil {
-			c.log.Warnf("JOIN(2) dial %s fallito: %v", addr, err)
+			c.log.Warnf("JOIN dial %s fallito: %v", addr, err)
 			return false
 		}
 		defer conn.Close()
 
 		cli := proto.NewGossipClient(conn)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
-		rep, err := cli.Join(ctx2, req)
-		cancel2()
+		ctxRPC, cancelRPC := context.WithTimeout(context.Background(), 2*time.Second)
+		rep, err := cli.Join(ctxRPC, req)
+		cancelRPC()
 		if err != nil {
-			c.log.Warnf("JOIN(2) su %s fallito: %v", addr, err)
+			c.log.Warnf("JOIN RPC su %s fallito: %v", addr, err)
 			return false
 		}
+
+		// successo: registra seed e unisci le risposte
 		if !slices.Contains(successAddrs, addr) {
 			successAddrs = append(successAddrs, addr)
 		}
-		for _, p := range rep.Peers {
-			peersByID[p.NodeId] = p
+		for _, p := range rep.GetPeers() {
+			if p != nil && p.NodeId != "" {
+				peersByID[p.NodeId] = p
+			}
 		}
-		for _, s := range rep.StatsSnapshot {
-			statsByID[s.NodeId] = s
+		for _, s := range rep.GetStatsSnapshot() {
+			if s != nil && s.NodeId != "" {
+				statsByID[s.NodeId] = s
+			}
 		}
-		c.log.Infof("JOIN(2)/OK via %s → peers+=%d, stats+=%d  (tot so far: peers=%d stats=%d)",
-			addr, len(rep.Peers), len(rep.StatsSnapshot), len(peersByID), len(statsByID))
 		return true
 	}
 
-	for attempt := 1; attempt <= 6 && len(successAddrs) < 2; attempt++ {
-		// randomizza l'ordine ad ogni tentativo, ma salta seed già riusciti
+	// tenta più giri finché non raggiungi target o esaurisci i tentativi
+	for attempt := 1; attempt <= 6 && len(successAddrs) < target; attempt++ {
+		// ordine random ad ogni giro
 		rnd.Shuffle(len(seeds), func(i, j int) { seeds[i], seeds[j] = seeds[j], seeds[i] })
 		for _, addr := range seeds {
-			if len(successAddrs) >= 2 {
+			if len(successAddrs) >= target {
 				break
 			}
-			if slices.Contains(successAddrs, addr) {
-				continue
-			}
-			c.log.Infof("JOIN(2)/TRY #%d → seed=%s", attempt, addr)
+			c.log.Infof("JOIN/TRY #%d → seed=%s", attempt, addr)
 			_ = tryOne(addr)
 		}
-		if len(successAddrs) >= 2 {
+		if len(successAddrs) >= target {
 			break
 		}
-		c.log.Warnf("JOIN(2) retry tra %.1fs (tempo SIM) — successi finora=%d", delaySim, len(successAddrs))
-		c.clock.SleepSim(time.Duration(delaySim * float64(time.Second)))
-		delaySim *= 2
+		// backoff (tempo simulato, se disponibile)
+		if c.clock != nil {
+			c.clock.SleepSim(time.Duration(delaySim * float64(time.Second)))
+		} else {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 
-	if len(successAddrs) < 2 {
-		return nil, successAddrs, fmt.Errorf("TryJoinTwo: successi=%d, servono 2", len(successAddrs))
+	// se non ne è andato a buon fine nemmeno uno
+	if len(successAddrs) == 0 {
+		return nil, nil, fmt.Errorf("JOIN fallito: tutti i seed irraggiungibili (%d candidati)", len(seeds))
 	}
 
 	// costruisci la reply aggregata

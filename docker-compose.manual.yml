@@ -1,9 +1,25 @@
+x-manual: &manual
+  entrypoint: []
+  command: ["sh","-lc","tail -f /dev/null"]
+
 services:
-  seed1:
-    entrypoint: ["sh","-lc","sleep infinity"]
-  seed2:
-    entrypoint: ["sh","-lc","sleep infinity"]
-  seed3:
-    entrypoint: ["sh","-lc","sleep infinity"]
-  peer:
-    entrypoint: ["sh","-lc","sleep infinity"]
+  seed1:  *manual
+  seed2:  *manual
+  seed3:  *manual
+  peer1:  *manual
+  peer2:  *manual
+  peer3:  *manual
+  peer4:  *manual
+  peer5:  *manual
+  peer6:  *manual
+  peer7:  *manual
+  peer8:  *manual
+  peer9:  *manual
+  peer10: *manual
+  peer11: *manual
+  peer12: *manual
+  peer13: *manual
+  peer14: *manual
+  peer15: *manual
+  peer16: *manual
+  peer17: *manual
