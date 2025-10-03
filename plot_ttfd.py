@@ -1,70 +1,87 @@
 #!/usr/bin/env python3
-
-#CONFIG_PATH=./config.json IS_SEED=false GRPC_ADDR=127.0.0.1:9020 SEEDS=127.0.0.1:9004 go run ./cmd/node ---> configurazioni del nodo, peggior caso unico seed
-
 import sys, csv, os, math
 import matplotlib.pyplot as plt
 
 def read_csv(path):
-    t_s, disc_total = [], []
+    """Ritorna (t_s, y_other) dal CSV con colonne ms,[discovered],[discovered_others]."""
+    t_s, y_other = [], []
     with open(path, newline="") as f:
         r = csv.DictReader(f)
         for row in r:
-            ms = int(row["ms"])
-            t_s.append(ms / 1000.0)
+            ms = int(row["ms"]); t_s.append(ms / 1000.0)
             if "discovered_others" in row and row["discovered_others"] != "":
-                disc_total.append(int(row["discovered_others"]) + 1)
+                y_other.append(int(row["discovered_others"]))
             else:
-                disc_total.append(int(row["discovered"]))
-    return t_s, disc_total
+                total = int(row["discovered"])
+                y_other.append(max(0, total - 1))
+    return t_s, y_other
 
-def main():
-    if len(sys.argv) < 2:
-        print("Uso: python3 plot_ttfd.py <path_csv> [EXPECTED_NODES] [output_png]")
-        sys.exit(1)
-
-    csv_path = sys.argv[1]
-    expected = int(sys.argv[2]) if len(sys.argv) >= 3 else 20
-    out_png = sys.argv[3] if len(sys.argv) >= 4 else os.path.splitext(csv_path)[0] + ".png"
-
-    t_s, disc_total = read_csv(csv_path)
-    y_other = [max(0, v - 1) for v in disc_total]   # esclude self
+def _setup_axes(ax, expected, title=None):
+    if title:
+        ax.set_title(title)
+    ax.set_xlabel("Tempo (s)")
+    ax.set_ylabel("Nodi scoperti")
+    ax.grid(True)
     target = max(0, expected - 1)
-
-    # TTFD = primo t in cui raggiunge target
-    t_tffd = None
-    for t, y in zip(t_s, y_other):
-        if y >= target:
-            t_tffd = t
-            break
-
-    # ---- Plot “clean” ----
-    plt.figure()
-    plt.step(t_s, y_other, where="post", linewidth=2)   # niente marker/pallini
-    plt.xlabel("Tempo (s)")
-    plt.ylabel("Nodi scoperti")
-    plt.title("Tempo di Full Discovery (ultimo nodo)")
-    plt.grid(True)
-
-    # Tick della Y solo su interi
-    ymax = max([target] + y_other) if y_other else target
-    plt.yticks(list(range(0, int(math.ceil(ymax)) + 1)))
-
-    # Linee guida al target e al TTFD (senza testo verticale)
     if target > 0:
-        plt.axhline(target, linestyle="--", linewidth=1)
-    if t_tffd is not None:
-        plt.axvline(t_tffd, linestyle="--", linewidth=1)
+        ax.axhline(target, linestyle="--", linewidth=1)
+    return target
 
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=160)
+# ---------- FUNZIONE 1: curva singola ----------
+def plot_single(csv_path, expected=20, out_png=None):
+    t_s, y = read_csv(csv_path)
+    if out_png is None:
+        out_png = os.path.splitext(csv_path)[0] + ".png"
+    fig, ax = plt.subplots(figsize=(9, 5))
+    target = _setup_axes(ax, expected, title=os.path.basename(csv_path))
+    ax.step(t_s, y, where="post", linewidth=2)
+    ymax = max([target] + y) if y else target
+    ax.set_yticks(list(range(0, int(math.ceil(ymax)) + 1)))
+    fig.tight_layout(); fig.savefig(out_png, dpi=160)
+    print(f"✅ Grafico singolo salvato: {out_png}")
+    return out_png
 
-    print(f"✅ Plot salvato: {out_png}")
-    last = y_other[-1] if y_other else 0
-    if last >= target and t_tffd is not None:
-        print(f"TTFD (altri {target}) ≈ {t_tffd:.3f} s")
+# ---------- FUNZIONE 2: overlay due curve ----------
+def plot_overlay(stats_csv, fc_csv, expected=20, out_png=None):
+    ts, ys = read_csv(stats_csv)  # Stats/AE
+    tf, yf = read_csv(fc_csv)     # First-Contact
+    if out_png is None:
+        out_png = os.path.splitext(stats_csv)[0] + "-overlay.png"
+    fig, ax = plt.subplots(figsize=(9, 5))
+    target = _setup_axes(ax, expected, title="Scoperta (ultimo nodo): Stats vs Primo Contatto")
+    ax.step(ts, ys, where="post", linewidth=2, label="Stats (AE)")
+    ax.step(tf, yf, where="post", linewidth=2, label="Primo contatto (SWIM ∪ Stats)")
+    ymax = max([target] + ys + yf) if (ys or yf) else target
+    ax.set_yticks(list(range(0, int(math.ceil(ymax)) + 1)))
+    ax.legend()
+    fig.tight_layout(); fig.savefig(out_png, dpi=160)
+    print(f"✅ Grafico overlay salvato: {out_png}")
+    return out_png
+
+# ---------- CLI ----------
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(
+            "Uso:\n"
+            "  python3 plot_ttfd.py single <csv> [EXPECTED_NODES] [output.png]\n"
+            "  python3 plot_ttfd.py overlay <stats_csv> <firstcontact_csv> [EXPECTED_NODES] [output.png]\n"
+        ); return
+    mode = args[0]
+    if mode == "single":
+        if len(args) < 2: print("Errore: serve <csv>"); return
+        csv_path = args[1]
+        expected = int(args[2]) if len(args) >= 3 else 20
+        out_png  = args[3] if len(args) >= 4 else None
+        plot_single(csv_path, expected, out_png)
+    elif mode == "overlay":
+        if len(args) < 3: print("Errore: servono <stats_csv> <firstcontact_csv>"); return
+        stats_csv = args[1]; fc_csv = args[2]
+        expected  = int(args[3]) if len(args) >= 4 else 20
+        out_png   = args[4] if len(args) >= 5 else None
+        plot_overlay(stats_csv, fc_csv, expected, out_png)
     else:
-        print(f"⚠️ Non ha raggiunto {target} nodi entro l'ultima misura. Ultimo valore: {last}/{target}")
+        print("Modo non riconosciuto. Usa 'single' o 'overlay'.")
 
 if __name__ == "__main__":
     main()

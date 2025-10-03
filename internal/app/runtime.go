@@ -281,6 +281,19 @@ func (rt *Runtime) tryJoinPostRecovery() {
 	rt.doJoin("JOIN post-recovery")
 }
 
+// safeAddPeer aggiunge un peer alla membership SWIM solo se il Manager è attivo.
+// Evita panic se rt.Mgr è nil (es. durante leave/fault o durante il riavvio dei servizi).
+func (rt *Runtime) safeAddPeer(id, addr string) {
+	if id == "" || addr == "" {
+		return
+	}
+	if rt.Mgr == nil {
+		rt.Log.Warnf("JOIN: SWIM Manager nil — skip AddPeer(%s,%s). Probabile fase di fault/leave.", id, addr)
+		return
+	}
+	rt.Mgr.AddPeer(id, addr)
+}
+
 func (rt *Runtime) doJoin(prefix string) {
 	jc := seed.NewJoinClient(rt.Log, rt.Clock)
 	pcts := rt.Node.PublishedPercentages()
@@ -297,23 +310,36 @@ func (rt *Runtime) doJoin(prefix string) {
 		},
 	}
 
-	// NEW: contatta almeno 2 seed distinti
+	// Accetta 1 o 2 seed (TryJoinTwo prova a contattarli fino a due distinti se disponibili).
 	rep, seedAddrs, err := jc.TryJoinTwo(rt.SeedsCSV, req)
 	if err != nil {
 		rt.Log.Warnf("%s non riuscito: %v (contattati=%v)", prefix, err, seedAddrs)
 		return
 	}
+	if rep == nil {
+		rt.Log.Warnf("%s: join reply nil (contattati=%v)", prefix, seedAddrs)
+		return
+	}
 	rt.Log.Infof("%s via %v — peers=%d", prefix, seedAddrs, len(rep.Peers))
 
-	// registra peers
-	rt.Mgr.AddPeer("seed@"+seedAddrs[0], seedAddrs[0])
-	if len(seedAddrs) > 1 {
-		rt.Mgr.AddPeer("seed@"+seedAddrs[1], seedAddrs[1])
+	// registra i seed contattati (0..2) in modo sicuro (no panic se SWIM è down)
+	if len(seedAddrs) >= 1 && seedAddrs[0] != "" {
+		rt.safeAddPeer("seed@"+seedAddrs[0], seedAddrs[0])
 	}
+	if len(seedAddrs) >= 2 && seedAddrs[1] != "" {
+		rt.safeAddPeer("seed@"+seedAddrs[1], seedAddrs[1])
+	}
+
+	// registra eventuali peer restituiti dal seed (ignora entry vuote)
 	for _, p := range rep.Peers {
-		rt.Mgr.AddPeer(p.NodeId, p.Addr)
+		if p == nil || p.NodeId == "" || p.Addr == "" {
+			continue
+		}
+		rt.safeAddPeer(p.NodeId, p.Addr)
 		rt.Log.Infof("  peer: node_id=%s addr=%s seed=%v", p.NodeId, p.Addr, p.IsSeed)
 	}
+
+	// semina/aggiorna lo store con lo snapshot di Stats (se presente)
 	if len(rep.StatsSnapshot) > 0 {
 		rt.Store.UpsertBatch(rep.StatsSnapshot)
 	}

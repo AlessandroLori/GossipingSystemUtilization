@@ -1,6 +1,7 @@
 package main
 
 //TODO reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
+// #CONFIG_PATH=./config.json IS_SEED=false GRPC_ADDR=127.0.0.1:9020 SEEDS=127.0.0.1:9004 go run ./cmd/node ---> configurazioni del nodo, peggior caso unico seed
 
 import (
 	crand "crypto/rand"
@@ -343,26 +344,46 @@ func main() {
 	}
 	rt.TryJoinIfNeeded()
 
-	// === TTFD tracker (SEMPRE attivo) ===
-	// Salva il CSV in ./out/ttfd-<nodeID>.csv (creata se manca).
+	// === Tracker 1: discovery via Stats/AE (sempre attivo) ===
 	{
 		expected := getenvInt("EXPECTED_NODES", 20)
-
-		// Campioniamo direttamente dallo store anti-entropy creato in main()
-		// API reale: SnapshotSample(max int, self *proto.Stats) []*proto.Stats
-		sampler := func(max int) []*proto.Stats {
-			return store.SnapshotSample(max, nil)
-		}
-
-		// Imposta default per path/periodo se non già forniti via ENV
+		sampler := func(max int) []*proto.Stats { return rt.Store.SnapshotSample(max, nil) }
 		if os.Getenv("TTFD_CSV") == "" {
 			os.Setenv("TTFD_CSV", fmt.Sprintf("./out/ttfd-%s.csv", id))
 		}
 		if os.Getenv("TTFD_PERIOD_MS") == "" {
 			os.Setenv("TTFD_PERIOD_MS", "200")
 		}
-
 		app.StartTTFDTracker(log, clock, sampler, id, expected)
+	}
+
+	// === Tracker 2: PRIMO CONTATTO (SWIM ∪ Stats) — sempre attivo, ma NIL-SAFE ===
+	{
+		expected := getenvInt("EXPECTED_NODES", 20)
+
+		// Se SWIM non è ancora pronto o è stato stoppato (fault/leave), restituisce lista vuota.
+		listIDs := func() []string {
+			if rt.Mgr == nil {
+				return nil
+			}
+			peers := rt.Mgr.AlivePeers()
+			out := make([]string, 0, len(peers))
+			for _, p := range peers {
+				if p.ID != "" {
+					out = append(out, p.ID)
+				}
+			}
+			return out
+		}
+		sampler := func(max int) []*proto.Stats { return rt.Store.SnapshotSample(max, nil) }
+
+		if os.Getenv("FC_CSV") == "" {
+			os.Setenv("FC_CSV", fmt.Sprintf("./out/fc-ttfd-%s.csv", id))
+		}
+		if os.Getenv("FC_PERIOD_MS") == "" {
+			os.Setenv("FC_PERIOD_MS", "200")
+		}
+		app.StartFirstContactDiscoveryTracker(log, clock, listIDs, sampler, id, expected)
 	}
 
 	select {}

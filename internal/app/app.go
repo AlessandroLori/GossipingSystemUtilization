@@ -140,21 +140,7 @@ func (a *App) Init() error {
 	return nil
 }
 
-/*
-StartTTFDTracker avvia (in goroutine) il tracking del "Time To Full Discovery"
-per il nodo corrente. Usa il tempo SIMULATO.
-
-Attivazione:
-  - TRACK_TTFD=1
-  - EXPECTED_NODES=<N> (default 20)
-  - TTFD_CSV=ttfd-<nodeID>.csv (vuoto per disabilitare il CSV)
-  - TTFD_PERIOD_MS=200 (campionamento)
-
-Parametri:
-  - sampler: funzione che restituisce un campione della vista AE (LocalSample)
-  - selfID:  id del nodo locale
-  - expected: totale nodi che il nodo deve scoprire
-*/
+// StartTTFDTracker: scoperta basata su Stats/AE (quando arriva una Stats con NodeId nuovo)
 func StartTTFDTracker(
 	log *logx.Logger,
 	clock *simclock.Clock,
@@ -162,33 +148,38 @@ func StartTTFDTracker(
 	selfID string,
 	expected int,
 ) {
-	// periodo di campionamento (ms)
 	periodMs := 200
 	if s := os.Getenv("TTFD_PERIOD_MS"); s != "" {
 		if v, err := strconvAtoiSafe(s); err == nil && v > 0 {
 			periodMs = v
 		}
 	}
-	// percorso CSV
 	csvPath := os.Getenv("TTFD_CSV")
 	if csvPath == "" {
 		csvPath = fmt.Sprintf("./out/ttfd-%s.csv", selfID)
 	}
 
 	go func() {
+		// protezione da panics: non uccidere il processo
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warnf("TTFD: recovered from panic: %v", r)
+			}
+		}()
+
 		t0ms := clock.NowSimMs()
 
-		// crea la cartella se manca (es. ./out)
+		// assicura la cartella
 		dir := filepath.Dir(csvPath)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Warnf("TTFD: mkdir %s fallita: %v", dir, err)
 		}
 
-		// apri CSV
+		// CSV
 		var f *os.File
 		if ff, err := os.Create(csvPath); err == nil {
 			f = ff
-			fmt.Fprintln(f, "ms,discovered")
+			fmt.Fprintln(f, "ms,discovered,discovered_others")
 			defer f.Close()
 		} else {
 			log.Warnf("TTFD: impossibile creare CSV %s: %v", csvPath, err)
@@ -196,6 +187,10 @@ func StartTTFDTracker(
 
 		seen := make(map[string]struct{})
 		seen[selfID] = struct{}{} // includi self
+		targetOthers := expected - 1
+		if targetOthers < 0 {
+			targetOthers = 0
+		}
 
 		ticker := time.NewTicker(time.Duration(periodMs) * time.Millisecond)
 		defer ticker.Stop()
@@ -203,21 +198,26 @@ func StartTTFDTracker(
 		for {
 			<-ticker.C
 
-			// prendi un campione "ampio"
-			sample := sampler(512)
-			for _, s := range sample {
-				if id := s.GetNodeId(); id != "" {
-					seen[id] = struct{}{}
+			// Stats / Anti-Entropy
+			if sampler != nil {
+				for _, s := range sampler(512) {
+					if id := s.GetNodeId(); id != "" {
+						seen[id] = struct{}{}
+					}
 				}
 			}
 
-			n := len(seen)
+			n := len(seen)  // include self
+			others := n - 1 // esclude self
+			if others < 0 {
+				others = 0
+			}
 			elapsed := clock.NowSimMs() - t0ms
 
 			if f != nil {
-				fmt.Fprintf(f, "%d,%d\n", elapsed, n)
+				fmt.Fprintf(f, "%d,%d,%d\n", elapsed, n, others)
 			}
-			log.Infof("TTFD/PROGRESS discovered=%d/%d elapsed_ms=%d", n, expected, elapsed)
+			log.Infof("TTFD/PROGRESS discovered=%d/%d elapsed_ms=%d", others, targetOthers, elapsed)
 
 			if n >= expected {
 				log.Infof("TTFD/DONE expected=%d elapsed_ms=%d path=%s", expected, elapsed, csvPath)
@@ -244,4 +244,104 @@ func strconvAtoiSafe(s string) (int, error) {
 		n = n*10 + int(r-'0')
 	}
 	return sign * n, nil
+}
+
+// StartFirstContactDiscoveryTracker misura la scoperta al PRIMO CONTATTO:
+// un nodo è "scoperto" se compare in SWIM (membership) OPPURE arriva una Stats per lui.
+// Scrive CSV: ms,discovered,discovered_others
+func StartFirstContactDiscoveryTracker(
+	log *logx.Logger,
+	clock *simclock.Clock,
+	listIDs func() []string, // membership SWIM (AlivePeers -> IDs)
+	sampler func(max int) []*proto.Stats, // campione Stats/AE
+	selfID string,
+	expected int,
+) {
+	periodMs := 200
+	if s := os.Getenv("FC_PERIOD_MS"); s != "" {
+		if v, err := strconvAtoiSafe(s); err == nil && v > 0 {
+			periodMs = v
+		}
+	}
+	csvPath := os.Getenv("FC_CSV")
+	if csvPath == "" {
+		csvPath = fmt.Sprintf("./out/fc-ttfd-%s.csv", selfID)
+	}
+
+	go func() {
+		// protezione da panics: non uccidere il processo
+		defer func() {
+			if r := recover(); r != nil {
+				log.Warnf("FC-TTFD: recovered from panic: %v", r)
+			}
+		}()
+
+		t0ms := clock.NowSimMs()
+
+		// assicura la cartella
+		dir := filepath.Dir(csvPath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Warnf("FC-TTFD: mkdir %s fallita: %v", dir, err)
+		}
+
+		// CSV
+		var f *os.File
+		if ff, err := os.Create(csvPath); err == nil {
+			f = ff
+			fmt.Fprintln(f, "ms,discovered,discovered_others")
+			defer f.Close()
+		} else {
+			log.Warnf("FC-TTFD: impossibile creare CSV %s: %v", csvPath, err)
+		}
+
+		seen := make(map[string]struct{})
+		seen[selfID] = struct{}{}
+		targetOthers := expected - 1
+		if targetOthers < 0 {
+			targetOthers = 0
+		}
+
+		ticker := time.NewTicker(time.Duration(periodMs) * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			<-ticker.C
+
+			// 1) SWIM membership (nil-safe)
+			if listIDs != nil {
+				for _, id := range listIDs() {
+					if id != "" {
+						seen[id] = struct{}{}
+					}
+				}
+			}
+
+			// 2) Stats / Anti-Entropy (nil-safe)
+			if sampler != nil {
+				for _, s := range sampler(512) {
+					if id := s.GetNodeId(); id != "" {
+						seen[id] = struct{}{}
+					}
+				}
+			}
+
+			n := len(seen)
+			others := n - 1
+			if others < 0 {
+				others = 0
+			}
+			elapsed := clock.NowSimMs() - t0ms
+
+			if f != nil {
+				// ms, discovered (incl. self), discovered_others
+				fmt.Fprintf(f, "%d,%d,%d\n", elapsed, n, others)
+			}
+			log.Infof("FC-TTFD/PROGRESS discovered=%d/%d elapsed_ms=%d", others, targetOthers, elapsed)
+
+			if n >= expected {
+				log.Infof("FC-TTFD/DONE expected=%d elapsed_ms=%d path=%s", expected, elapsed, csvPath)
+				return
+			}
+		}
+	}()
 }
