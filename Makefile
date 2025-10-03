@@ -1,112 +1,91 @@
-# --- Variabili ---
-COMPOSE := docker compose
-BASE := -f docker-compose.yml
-MANUAL := -f docker-compose.yml -f docker-compose.manual.yml
+# ===== Makefile per GossipSystemUtilization =====
+SHELL := /bin/bash
 
-# Elenca qui i servizi peer che hai nel compose:
-PEERS := peer1 peer2 peer3 peer4 peer5 peer6 peer7 peer8 peer9 peer10 peer11 peer12 peer13 peer14 peer15 peer16
-SEEDS := seed1 seed2 seed3
+GO      := go
+PROTOC  := protoc
+GOPATH  := $(shell $(GO) env GOPATH)
 
-# (opzionale) se nel compose hai un "name:" diverso, aggiornalo qui
-PROJECT := gossipsystutil
+# Plugin protoc (installati con: go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#                                     go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest)
+PROTOC_GEN_GO       := $(GOPATH)/bin/protoc-gen-go
+PROTOC_GEN_GO_GRPC  := $(GOPATH)/bin/protoc-gen-go-grpc
 
-# --- Phony ---
-.PHONY: build build-nocache up up-auto up-manual up-seeds up-peers \
-        ps logs logs-% logs-peer-% \
-        stop stop-seeds stop-peers down clean restart restart-% \
-        sh-% sh-peer-% \
-        start-% start-seeds start-peers start-all
+# Proto
+PROTO_DIR := proto
+PROTO_SRC := $(PROTO_DIR)/gossip.proto
+PROTO_GEN := $(PROTO_DIR)/gossip.pb.go $(PROTO_DIR)/gossip_grpc.pb.go
 
-# --- BUILD: solo immagini, non avvia nulla ---
-build:
-	$(COMPOSE) build
+# Parametri di run (override da CLI: make run-peer BOOT=30 PEER_ADDR=127.0.0.1:9002 SEEDS=127.0.0.1:9001)
+CONFIG    ?= ./config.json
+ADDR      ?= 127.0.0.1:9001
+PEER_ADDR ?= 127.0.0.1:9002
+SEEDS     ?= 127.0.0.1:9001
+BOOT      ?= 0
 
-build-nocache:
-	$(COMPOSE) build --no-cache
+.PHONY: all proto build clean tidy fmt vet regen check-plugins check-proto run-seed run-peer doctor
 
-# --- UP AUTOMATICO (ENTRYPOINT attivo) ---
-# Avvia TUTTI i servizi elencati (seeds + peers)
-up:
-	$(COMPOSE) $(BASE) up -d $(SEEDS) $(PEERS)
+## Default: pulisci mod, genera .pb.go e builda
+all: tidy proto build
 
-# alias
-up-auto: up
+## Verifica che protoc e plugin siano presenti
+check-plugins:
+	@command -v $(PROTOC) >/dev/null || { echo "ERR: protoc non trovato nel PATH"; exit 1; }
+	@test -x "$(PROTOC_GEN_GO)" || { echo "ERR: protoc-gen-go non trovato a $(PROTOC_GEN_GO)"; exit 1; }
+	@test -x "$(PROTOC_GEN_GO_GRPC)" || { echo "ERR: protoc-gen-go-grpc non trovato a $(PROTOC_GEN_GO_GRPC)"; exit 1; }
 
-# --- UP MANUALE (override con sleep infinity) ---
-up-manual:
-	$(COMPOSE) $(MANUAL) up -d $(SEEDS) $(PEERS)
+## Rigenera i file gRPC dal .proto (output dentro ./proto)
+proto: check-plugins
+	@echo ">> Rigenero stubs gRPC"
+	@rm -f $(PROTO_GEN)
+	@$(PROTOC) -I $(PROTO_DIR) \
+	  --plugin=protoc-gen-go="$(PROTOC_GEN_GO)" \
+	  --plugin=protoc-gen-go-grpc="$(PROTOC_GEN_GO_GRPC)" \
+	  --go_out=$(PROTO_DIR) --go_opt=paths=source_relative \
+	  --go-grpc_out=$(PROTO_DIR) --go-grpc_opt=paths=source_relative \
+	  $(PROTO_SRC)
+	@$(MAKE) check-proto
 
-# Solo seeds / solo peers (comodo se vuoi avviarli in fasi)
-up-seeds:
-	$(COMPOSE) $(BASE) up -d $(SEEDS)
+## Controllo di qualità sui file generati
+check-proto:
+	@grep -q 'type AvailBatch' $(PROTO_DIR)/gossip.pb.go || { echo "ERR: AvailBatch mancante in gossip.pb.go"; exit 1; }
+	@grep -q 'ExchangeAvail(context' $(PROTO_DIR)/gossip_grpc.pb.go || { echo "ERR: ExchangeAvail mancante in gossip_grpc.pb.go"; exit 1; }
+	@echo ">> proto OK"
 
-up-peers:
-	$(COMPOSE) $(BASE) up -d $(PEERS)
-
-# --- Stato & Log ---
-ps:
-	$(COMPOSE) ps
-
-# log di un servizio qualsiasi (es. make logs-seed1, logs-peer7)
-logs-%:
-	$(COMPOSE) logs -f $*
-
-# log di un peer per indice numerico: make logs-peer-7 -> servizio "peer7"
-logs-peer-%:
-	$(COMPOSE) logs -f peer$*
-
-# tutti i log
-logs:
-	$(COMPOSE) logs -f
-
-# --- Stop / Down / Clean ---
-stop:
-	$(COMPOSE) stop
-
-stop-seeds:
-	$(COMPOSE) stop $(SEEDS)
-
-stop-peers:
-	$(COMPOSE) stop $(PEERS)
-
-down:
-	$(COMPOSE) down --remove-orphans
-
+## Pulizia cache Go e file generati
 clean:
-	$(COMPOSE) down -v --remove-orphans
-	docker image prune -f
+	@echo ">> Pulizia cache e file generati"
+	@rm -f $(PROTO_GEN)
+	@$(GO) clean -cache -testcache
 
-restart:
-	$(COMPOSE) restart
+## Pulizia + rigenerazione .proto
+regen: clean proto
 
-restart-%:
-	$(COMPOSE) restart $*
+## Mod tidy/fmt/vet
+tidy:
+	$(GO) mod tidy
 
-# --- Shell nei container ---
-# shell su un servizio qualsiasi (seed1, peer7, ecc.)
-sh-%:
-	$(COMPOSE) exec $* sh
+fmt:
+	$(GO) fmt ./...
 
-# shell su peer per indice numerico: make sh-peer-7 -> "peer7"
-sh-peer-%:
-	$(COMPOSE) exec peer$* sh
+vet:
+	$(GO) vet ./...
 
-# --- AVVIO MANUALE DELL’APP DENTRO I CONTAINER ---
-# usa pgrep/pidof per evitare doppi avvii; se non gira, esegue l'entrypoint
+## Build progetto
+build:
+	$(GO) build ./...
 
-start-%:
-	$(COMPOSE) exec $* sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$*] già in esecuzione" || exec /app/entrypoint.sh'
+## Avvio seed
+run-seed:
+	CONFIG_PATH=$(CONFIG) GRPC_ADDR=$(ADDR) IS_SEED=true SEEDS= BOOT_DELAY_SIM_S=$(BOOT) $(GO) run ./cmd/node
 
-start-seeds:
-	@for s in $(SEEDS); do \
-	  echo ">> Avvio $$s"; \
-	  $(COMPOSE) exec $$s sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$$s] già in esecuzione" || exec /app/entrypoint.sh'; \
-	done
+## Avvio peer
+run-peer:
+	CONFIG_PATH=$(CONFIG) GRPC_ADDR=$(PEER_ADDR) IS_SEED=false SEEDS=$(SEEDS) BOOT_DELAY_SIM_S=$(BOOT) $(GO) run ./cmd/node
 
-start-peers:
-	@for p in $(PEERS); do \
-	  echo ">> Avvio $$p"; \
-	  $(COMPOSE) exec $$p sh -lc '(pgrep -x node >/dev/null 2>&1 || pidof node >/dev/null 2>&1) && echo "[$$p] già in esecuzione" || exec /app/entrypoint.sh'; \
-	done
-
-start-all: start-seeds start-peers
+## Controlli rapidi: import sbagliati che spesso rompono i tipi generati
+doctor:
+	@echo ">> Doctor: controllo import 'google.golang.org/protobuf/proto' in file che devono usare il tuo 'proto'"
+	@! grep -R --line-number 'google.golang.org/protobuf/proto' internal/antientropy internal/seed internal/swim 2>/dev/null || { echo "ATTENZIONE: rimuovi quell'import o rinominalo (es. goproto)"; exit 1; }
+	@echo ">> Doctor: controllo duplicati di gossip*_pb.go fuori da ./proto"
+	@! find . -type f -name 'gossip*_pb.go' -not -path './proto/*' -print | grep . && { echo "ATTENZIONE: rimuovi i duplicati indicati sopra"; exit 1; } || true
+	@echo ">> Doctor OK"

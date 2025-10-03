@@ -5,6 +5,7 @@ package main
 import (
 	crand "crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"GossipSystemUtilization/internal/node"
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
+
+	proto "GossipSystemUtilization/proto"
 
 	mrand "math/rand"
 )
@@ -50,6 +53,17 @@ func getenvFloat(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+func getenvInt(key string, def int) int {
+	s := os.Getenv(key)
+	if s == "" {
+		return def
+	}
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return def
+	}
+	return i
 }
 
 // pick pesata: accetta mappa "label"->peso, restituisce una key
@@ -155,7 +169,6 @@ func main() {
 	store := antientropy.NewStore(log, clock)
 
 	// === LOG: profilo nodo (suitability) + mix generazione + soglie heavy ===
-	// Stimiamo la suitability normalizzando le capacità del power class scelto.
 	var capSel model.Capacity
 	var gpuProb float64
 	switch pc {
@@ -329,6 +342,28 @@ func main() {
 		clock.SleepSim(time.Duration(bootDelaySim * float64(time.Second)))
 	}
 	rt.TryJoinIfNeeded()
+
+	// === TTFD tracker (SEMPRE attivo) ===
+	// Salva il CSV in ./out/ttfd-<nodeID>.csv (creata se manca).
+	{
+		expected := getenvInt("EXPECTED_NODES", 20)
+
+		// Campioniamo direttamente dallo store anti-entropy creato in main()
+		// API reale: SnapshotSample(max int, self *proto.Stats) []*proto.Stats
+		sampler := func(max int) []*proto.Stats {
+			return store.SnapshotSample(max, nil)
+		}
+
+		// Imposta default per path/periodo se non già forniti via ENV
+		if os.Getenv("TTFD_CSV") == "" {
+			os.Setenv("TTFD_CSV", fmt.Sprintf("./out/ttfd-%s.csv", id))
+		}
+		if os.Getenv("TTFD_PERIOD_MS") == "" {
+			os.Setenv("TTFD_PERIOD_MS", "200")
+		}
+
+		app.StartTTFDTracker(log, clock, sampler, id, expected)
+	}
 
 	select {}
 }

@@ -4,8 +4,11 @@ package app
 
 import (
 	"fmt"
-	"math/rand"
+	"os"
+	"path/filepath"
 	"time"
+
+	"math/rand"
 
 	"google.golang.org/grpc"
 
@@ -135,4 +138,110 @@ func (a *App) Init() error {
 	}
 
 	return nil
+}
+
+/*
+StartTTFDTracker avvia (in goroutine) il tracking del "Time To Full Discovery"
+per il nodo corrente. Usa il tempo SIMULATO.
+
+Attivazione:
+  - TRACK_TTFD=1
+  - EXPECTED_NODES=<N> (default 20)
+  - TTFD_CSV=ttfd-<nodeID>.csv (vuoto per disabilitare il CSV)
+  - TTFD_PERIOD_MS=200 (campionamento)
+
+Parametri:
+  - sampler: funzione che restituisce un campione della vista AE (LocalSample)
+  - selfID:  id del nodo locale
+  - expected: totale nodi che il nodo deve scoprire
+*/
+func StartTTFDTracker(
+	log *logx.Logger,
+	clock *simclock.Clock,
+	sampler func(max int) []*proto.Stats,
+	selfID string,
+	expected int,
+) {
+	// periodo di campionamento (ms)
+	periodMs := 200
+	if s := os.Getenv("TTFD_PERIOD_MS"); s != "" {
+		if v, err := strconvAtoiSafe(s); err == nil && v > 0 {
+			periodMs = v
+		}
+	}
+	// percorso CSV
+	csvPath := os.Getenv("TTFD_CSV")
+	if csvPath == "" {
+		csvPath = fmt.Sprintf("./out/ttfd-%s.csv", selfID)
+	}
+
+	go func() {
+		t0ms := clock.NowSimMs()
+
+		// crea la cartella se manca (es. ./out)
+		dir := filepath.Dir(csvPath)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Warnf("TTFD: mkdir %s fallita: %v", dir, err)
+		}
+
+		// apri CSV
+		var f *os.File
+		if ff, err := os.Create(csvPath); err == nil {
+			f = ff
+			fmt.Fprintln(f, "ms,discovered")
+			defer f.Close()
+		} else {
+			log.Warnf("TTFD: impossibile creare CSV %s: %v", csvPath, err)
+		}
+
+		seen := make(map[string]struct{})
+		seen[selfID] = struct{}{} // includi self
+
+		ticker := time.NewTicker(time.Duration(periodMs) * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			<-ticker.C
+
+			// prendi un campione "ampio"
+			sample := sampler(512)
+			for _, s := range sample {
+				if id := s.GetNodeId(); id != "" {
+					seen[id] = struct{}{}
+				}
+			}
+
+			n := len(seen)
+			elapsed := clock.NowSimMs() - t0ms
+
+			if f != nil {
+				fmt.Fprintf(f, "%d,%d\n", elapsed, n)
+			}
+			log.Infof("TTFD/PROGRESS discovered=%d/%d elapsed_ms=%d", n, expected, elapsed)
+
+			if n >= expected {
+				log.Infof("TTFD/DONE expected=%d elapsed_ms=%d path=%s", expected, elapsed, csvPath)
+				return
+			}
+		}
+	}()
+}
+
+// helper atoi "tollerante"
+func strconvAtoiSafe(s string) (int, error) {
+	var n int
+	sign := 1
+	for i, r := range s {
+		if i == 0 && (r == '-' || r == '+') {
+			if r == '-' {
+				sign = -1
+			}
+			continue
+		}
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("not a number")
+		}
+		n = n*10 + int(r-'0')
+	}
+	return sign * n, nil
 }
