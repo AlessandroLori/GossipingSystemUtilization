@@ -10,7 +10,7 @@ const (
 	ClassGeneral
 )
 
-// soglie "heavy" configurabili a runtime
+// soglie "heavy"
 var cpuHeavyTh = 70.0
 var memHeavyTh = 70.0
 var gpuHeavyTh = 50.0

@@ -26,7 +26,6 @@ type ReputationTable struct {
 }
 
 // NewReputationTable crea una nuova tabella reputazione.
-// Parametri consigliati: halfLifeSec=90, decayEveryMs=5000, minScore=-5, maxScore=10.
 func NewReputationTable(clk *simclock.Clock, halfLifeSec float64, decayEveryMs int64, minScore, maxScore float64, verbose bool) *ReputationTable {
 	if halfLifeSec <= 0 {
 		halfLifeSec = 90
@@ -100,7 +99,7 @@ func (r *ReputationTable) Bump(class JobClass, peer string, delta float64, reaso
 	}
 }
 
-// Eventi tipici (puoi chiamarli dal seed_coordinator / RPC outcomes)
+// Eventi
 func (r *ReputationTable) OnProbeAccept(class JobClass, peer string) {
 	r.Bump(class, peer, +0.5, "probe_accept")
 }
@@ -186,7 +185,7 @@ func (r *ReputationTable) StartDecayLoop(stopCh <-chan struct{}) {
 func (r *ReputationTable) ensureClassLocked(class JobClass) map[string]float64 {
 	m, ok := r.score[class]
 	if !ok {
-		m = make(map[JobClass]map[string]float64, 64)[class] // placeholder to avoid nil; fixed below
+		m = make(map[JobClass]map[string]float64, 64)[class] // placeholder per evitare nil
 		m = make(map[string]float64, 64)
 		r.score[class] = m
 	}

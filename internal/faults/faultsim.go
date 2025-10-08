@@ -19,10 +19,10 @@ type Params struct {
 	PrintTransitions bool
 }
 
-// Hook opzionali da collegare dal main.
+// Hooks
 type Hooks struct {
-	OnDown func() // es. sospendere risposte RPC
-	OnUp   func() // es. riprendere risposte RPC
+	OnDown func() // sospendere risposte RPC
+	OnUp   func() // riprendere risposte RPC
 }
 
 type Sim struct {
@@ -56,7 +56,7 @@ func (s *Sim) loop() {
 	// Estrai stato iniziale
 	down := s.rnd.Float64() < s.par.FailureProb
 
-	// Non generare un "UP" spurio alla partenza.
+	// Non genera "UP" spurio alla partenza.
 	if down {
 		s.apply(true)
 	}
@@ -127,11 +127,11 @@ type NodeFaultProfile struct {
 	DurClass  string // "grave" | "medium" | "small"
 
 	// parametri numerici risultanti
-	CrashProbPerMinSim float64 // frequenza guasti del nodo (per minuto simulato)
+	CrashProbPerMinSim float64 // frequenza guasti del nodo (minuto simulato)
 	DownTimeMeanSimS   float64 // durata media di ciascun guasto (secondi simulati)
 }
 
-// [NUOVO] AutoProfileDef: profilo “a buckets” (nuovo JSON o compat legacy)
+// AutoProfileDef: profilo “a buckets” (JSON o compat legacy)
 type AutoProfileDef struct {
 	Enabled               bool
 	PrintTransitions      bool
@@ -141,7 +141,7 @@ type AutoProfileDef struct {
 	DurationMeanSimS      map[string]float64 // small/medium/grave → mean down (s)
 }
 
-// [NUOVO] default robusti
+// default robusti
 func DefaultAutoProfile(printTransitions bool) AutoProfileDef {
 	return AutoProfileDef{
 		Enabled:          true,
@@ -244,7 +244,7 @@ func BuildParamsFromProfile(profile NodeFaultProfile, printTransitions bool) Par
 	}
 	return Params{
 		Enabled:          true,
-		FailureProb:      0.0, // non partiamo già down (puoi cambiarlo se vuoi)
+		FailureProb:      0.0,
 		MeanUpSimS:       meanUp,
 		MeanDownSimS:     downMean,
 		FlapProb:         0.0,
@@ -252,7 +252,7 @@ func BuildParamsFromProfile(profile NodeFaultProfile, printTransitions bool) Par
 	}
 }
 
-// InitSimWithProfile: funzione “one-shot” per disegnare il profilo e creare la Sim pronta a partire
+// InitSimWithProfile: “one-shot” disegna  profilo e crea Sim pronta a partire
 func InitSimWithProfile(
 	log *logx.Logger,
 	clock *simclock.Clock,

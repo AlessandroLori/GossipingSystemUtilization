@@ -47,7 +47,7 @@ type peerEntry struct {
 
 const mdKeySwim = "x-swim" // metadata per annunci SWIM: es. "dead:<nodeID>"
 
-// Callback opzionale per notifiche membership (ALIVE/SUSPECT/DEAD)
+// Callback per notifiche membership (ALIVE/SUSPECT/DEAD)
 type StatusChangeHandler func(id, addr string, old, new Status, reason string)
 
 type Manager struct {
@@ -64,10 +64,10 @@ type Manager struct {
 	deathAnnounce map[string]time.Time
 
 	// parametri SWIM
-	period           time.Duration // es. 1s SIM
-	timeout          time.Duration // es. 250ms reale (non sim)
-	indirectK        int           // es. 3
-	suspicionTimeout time.Duration // es. 6s SIM
+	period           time.Duration
+	timeout          time.Duration
+	indirectK        int
+	suspicionTimeout time.Duration
 
 	seq uint64
 
@@ -97,7 +97,7 @@ func (m *Manager) AlivePeers() []Peer {
 	return out
 }
 
-// FanoutHint: suggerisce un fanout minimo (qui costante).
+// FanoutHint: suggerisce un fanout minimo.
 func (m *Manager) FanoutHint(hint int) int {
 	if hint <= 0 {
 		hint = 2
@@ -167,7 +167,7 @@ func (m *Manager) setStatus(p *peerEntry, newSt Status, reason string) {
 	case Suspect:
 		p.SuspectDeadline = m.clock.NowSim().Add(m.suspicionTimeout)
 	case Dead:
-		m.markDeath(p.ID) // annunceremo questa morte per qualche tick
+		m.markDeath(p.ID) //annunciamo la morte
 	}
 	m.log.Warnf("SWIM %s → %s  peer=%s (%s)  reason=%s", old, newSt, p.ID, p.Addr, reason)
 
@@ -319,7 +319,6 @@ func (m *Manager) nextSeq() uint64 {
 
 func (m *Manager) markDeath(id string) {
 	m.mu.Lock()
-	// Paracadute nel caso qualcuno in futuro cambi il costruttore
 	if m.deathAnnounce == nil {
 		m.deathAnnounce = make(map[string]time.Time)
 	}
@@ -412,7 +411,7 @@ func (m *Manager) maybeSetSuspect(p *peerEntry, reason string) {
 		// non rinfrescare la deadline: lasciamo che il timeout faccia SUSPECT→DEAD
 		m.log.Warnf("SWIM still SUSPECT  peer=%s (%s) reason=%s", p.ID, p.Addr, reason)
 	default:
-		// DEAD: nulla
+		// DEAD
 	}
 }
 

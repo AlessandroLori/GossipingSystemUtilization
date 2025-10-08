@@ -80,7 +80,7 @@ func (r *Reporter) loop() {
 		// Attendi il periodo simulato
 		r.clk.SleepSim(r.period)
 
-		// Ricontrolla stop prima di stampare (evita l'ultimo summary dopo Stop)
+		// Ricontrolla stop prima di stampare
 		select {
 		case <-r.stopCh:
 			return
@@ -127,6 +127,9 @@ func (r *Reporter) printSummary() {
 		}
 	}
 	/*
+
+		CLUSTER
+
 		avgCPU := sumCPU / float64(nCPU)
 		avgMEM := sumMEM / float64(nMEM)
 

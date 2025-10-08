@@ -1,6 +1,5 @@
 package main
 
-//TODO reporter dettagliati per nodo , un nodo per container , semplificazion id nodi e stampe più chiare.
 // #CONFIG_PATH=./config.json IS_SEED=false GRPC_ADDR=127.0.0.1:9020 SEEDS=127.0.0.1:9004 go run ./cmd/node ---> configurazioni del nodo, peggior caso unico seed
 
 import (
@@ -184,7 +183,7 @@ func main() {
 		capSel = caps.MediumCap
 		gpuProb = caps.GPUProbMedium
 	}
-	// Heuristica presenza GPU: dallo snapshot delle stats (GpuPct<0 → no GPU)
+	// Presenza GPU: dallo snapshot delle stats (GpuPct<0 → no GPU)
 	snap := n.CurrentStatsProto()
 	hasGPU := snap.GpuPct >= 0
 	tot := capSel.CPU + capSel.MEM
@@ -250,9 +249,9 @@ func main() {
 
 	// === Coordinator (seed e/o peer) ===
 	if cfg.Workload.Enabled && (isSeed || cfg.Workload.GenerateOnPeers) {
-		// Persona per-nodo (come già fai per il seed)
+		// Persona per-nodo
 		u := r.Float64()
-		primary := 0 // GENERAL
+		primary := 0
 		switch {
 		case u < 0.25:
 			primary = 0
@@ -325,8 +324,7 @@ func main() {
 	}
 
 	// === Fault-sim (Crash & Recovery) ===
-	// Usa il percorso che disegna e LOGGA il profilo per-nodo (InitSimWithProfile),
-	// collegando gli hook al runtime per fermare/riavviare i servizi.
+	// Collega gli hook al runtime per fermare/riavviare i servizi.
 	app.StartFaultRecovery(
 		log, clock, r,
 		app.FaultProfileInput{

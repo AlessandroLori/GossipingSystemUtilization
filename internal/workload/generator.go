@@ -50,7 +50,7 @@ type Params struct {
 	PGPULarge   float64
 }
 
-// Emette job sintetici sul canale Out() secondo i parametri e l'orologio simulato.
+// Job sintetici sul canale Out() secondo i parametri e l'orologio simulato.
 type Generator struct {
 	log   *logx.Logger
 	clock *simclock.Clock

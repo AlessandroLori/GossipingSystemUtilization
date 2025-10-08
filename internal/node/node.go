@@ -63,7 +63,7 @@ func (n *Node) SelfStatsSim() *proto.Stats {
 //   - baseline% da Bg/Cap (cpu, mem, gpu)  (+ eventuale Used se lo userai)
 //   - somma i carichi extra (extraCPU/MEM/GPU) dei job attivi
 //
-// Nota: GPU=-1 significa “assente” e ignora extraGPU.
+// Nota: GPU=-1 “assente” e ignora extraGPU.
 func (n *Node) PublishedPercentages() model.Percentages {
 	// baseline dalle H/s di background (e Used se vuoi in futuro)
 	baseCPU := pct(n.Bg.CPU+n.Used.CPU, n.Cap.CPU)
@@ -125,7 +125,7 @@ type PowerCaps struct {
 }
 
 type BgBaselines struct {
-	CPUmean float64 // punti percentuali (0..100)
+	CPUmean float64 // punti percentuali
 	MEMmean float64
 	GPUmean float64
 }
@@ -163,7 +163,7 @@ func (n *Node) Init(power model.PowerClass, caps PowerCaps, bgWeak, bgMed, bgStr
 		n.Cap.GPU = 0
 	}
 
-	// Baseline background in % (solo mean in questo step)
+	// Baseline background in % (solo mean)
 	var cpuPct, memPct, gpuPct float64
 	switch power {
 	case model.PowerWeak:
@@ -209,7 +209,7 @@ func (n *Node) Init(power model.PowerClass, caps PowerCaps, bgWeak, bgMed, bgStr
 		bgCPU, bgMEM, bgGPU, pcts.CPU, pcts.MEM, pcts.GPU)
 }
 
-// CurrentStatsProto restituisce le percentuali correnti in proto.Stats.
+// Restituisce le percentuali correnti in proto.Stats.
 func (n *Node) CurrentStatsProto() *proto.Stats {
 	p := n.PublishedPercentages()
 	return &proto.Stats{

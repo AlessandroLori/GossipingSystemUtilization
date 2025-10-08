@@ -14,11 +14,9 @@ type Config struct {
 	NodePowerClasses NodePowerClasses `json:"node_power_classes"`
 	BackgroundLoad   BackgroundLoad   `json:"background_load"`
 
-	Workload  Workload  `json:"workload"`
-	Scheduler Scheduler `json:"scheduler"`
-	Faults    Faults    `json:"faults"`
-
-	// ===== NUOVO =====
+	Workload        Workload        `json:"workload"`
+	Scheduler       Scheduler       `json:"scheduler"`
+	Faults          Faults          `json:"faults"`
 	Leaves          Leaves          `json:"leaves"`
 	FriendsAffinity FriendsAffinity `json:"friends_affinity"`
 }
@@ -92,7 +90,7 @@ type Workload struct {
 	JobGPU               RangePct      `json:"job_gpu"`
 	JobDurationSimS      DurationRange `json:"job_duration_sim_s"`
 
-	// (NUOVO) Bucket + probabilità; se TUTTI presenti, sovrascrivono i range legacy
+	//Bucket + probabilità; se TUTTI presenti, sovrascrivono i range legacy
 	CPUBuckets      *ProbBucketsPct `json:"cpu_buckets,omitempty"`
 	MEMBuckets      *ProbBucketsPct `json:"mem_buckets,omitempty"`
 	GPUBuckets      *ProbBucketsPct `json:"gpu_buckets,omitempty"`
@@ -111,7 +109,7 @@ type DurationRange struct {
 
 // ===== Friends & Affinity (pesi/soglie) =====
 type FriendsAffinity struct {
-	// Pesi composizione score (0..1 ciascuno; verranno normalizzati alla somma)
+	// Pesi composizione score (0..1 ciascuno; normalizzati alla somma)
 	WeightPerf   float64 `json:"weight_perf"`   // (1 - projectedLoad)
 	WeightAdvert float64 `json:"weight_advert"` // avail da piggyback 0..1
 	WeightLoad   float64 `json:"weight_load"`   // (1 - currentLoad)
@@ -131,7 +129,7 @@ type FriendsAffinity struct {
 	TopK int `json:"topk"`
 }
 
-// Usa i bucket (invece dei range) solo se sono TUTTI presenti
+// Usa i bucket (invece dei range)
 func (w *Workload) UseBuckets() bool {
 	return w != nil && w.CPUBuckets != nil && w.MEMBuckets != nil && w.GPUBuckets != nil && w.DurationBuckets != nil
 }
@@ -165,7 +163,7 @@ func norm3(a, b, c *float64) {
 	*c /= sum
 }
 
-// Soglie heavy effettive: default (70/70/50), ma se ci sono i bucket usiamo i "large"
+// Soglie heavy effettive: default
 func (c *Config) EffectiveThresholds() (cpuHeavy, memHeavy, gpuHeavy float64) {
 	cpuHeavy, memHeavy, gpuHeavy = 70.0, 70.0, 50.0
 	if c.Workload.CPUBuckets != nil && c.Workload.CPUBuckets.LargePct > 0 {
@@ -191,9 +189,9 @@ type Scheduler struct {
 type Leaves struct {
 	Enabled               *bool              `json:"enabled,omitempty"`
 	PrintTransitions      *bool              `json:"print_transitions,omitempty"`
-	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights,omitempty"` // es: none/low/medium/high
+	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights,omitempty"` // none/low/medium/high
 	FrequencyPerMinSim    map[string]float64 `json:"frequency_per_min_sim,omitempty"`   // rate per classe
-	DurationClassWeights  map[string]float64 `json:"duration_class_weights,omitempty"`  // es: short/medium/long
+	DurationClassWeights  map[string]float64 `json:"duration_class_weights,omitempty"`  // short/medium/long
 	DurationMeanSimS      map[string]float64 `json:"duration_mean_sim_s,omitempty"`     // media durata per classe
 }
 
@@ -204,19 +202,16 @@ type Faults struct {
 	Enabled          *bool `json:"enabled,omitempty"`
 	PrintTransitions *bool `json:"print_transitions,omitempty"`
 
-	// --- NUOVO formato "a buckets" ---
+	// --- a buckets ---
 	FrequencyClassWeights map[string]float64 `json:"frequency_class_weights,omitempty"`
 	FrequencyPerMinSim    map[string]float64 `json:"frequency_per_min_sim,omitempty"`
 	DurationClassWeights  map[string]float64 `json:"duration_class_weights,omitempty"`
 	DurationMeanSimS      map[string]float64 `json:"duration_mean_sim_s,omitempty"`
 
 	// --- LEGACY ---
-	// Esempio: {"rangepct": {"none":0.1,"low":0.4,"medium":0.35,"high":0.15}}
-	RangePct map[string]float64 `json:"rangepct,omitempty"`
-	// Esempio: {"durationrange": {"small":5,"medium":20,"grave":60}}
+	RangePct      map[string]float64 `json:"rangepct,omitempty"`
 	DurationRange map[string]float64 `json:"durationrange,omitempty"`
-	// opzionale legacy: singolo λ globale
-	FreqPerMinSim *float64 `json:"freq_per_min_sim,omitempty"`
+	FreqPerMinSim *float64           `json:"freq_per_min_sim,omitempty"`
 }
 
 // ===== Loader =====
@@ -232,10 +227,10 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// (NUOVO) normalizza le probabilità dei bucket, se presenti
+	//normalizza le probabilità dei bucket, se presenti
 	c.Workload.normalize()
 
-	c.applyDefaults() // defaults non-faults
+	c.applyDefaults()
 
 	return &c, nil
 }
@@ -258,7 +253,7 @@ func (c *Config) applyDefaults() {
 		c.Workload.JobMEM = RangePct{MinPct: 3, MaxPct: 12}
 	}
 	// GPU opzionale
-	// Durata default 10-30s simulati
+	// Durata default sec simulati
 	if c.Workload.JobDurationSimS.MinS == 0 && c.Workload.JobDurationSimS.MaxS == 0 {
 		c.Workload.JobDurationSimS = DurationRange{MinS: 10, MaxS: 30}
 	}
@@ -319,7 +314,7 @@ func (c *Config) ToFaultsAutoProfileDef() faults.AutoProfileDef {
 		def.Enabled = *c.Faults.Enabled
 	}
 
-	// Caso 1: NUOVO formato → copia diretto se presente
+	// Caso 1: copia diretto se presente
 	if len(c.Faults.FrequencyClassWeights) > 0 {
 		def.FrequencyClassWeights = copyMap(c.Faults.FrequencyClassWeights, def.FrequencyClassWeights)
 	}
@@ -333,7 +328,7 @@ func (c *Config) ToFaultsAutoProfileDef() faults.AutoProfileDef {
 		def.DurationMeanSimS = copyMap(c.Faults.DurationMeanSimS, def.DurationMeanSimS)
 	}
 
-	// Caso 2: LEGACY → mappe su buckets
+	// Caso 2: mappe su buckets
 	if len(c.Faults.RangePct) > 0 {
 		for _, k := range []string{"none", "low", "medium", "high"} {
 			if v, ok := c.Faults.RangePct[k]; ok {
@@ -348,7 +343,6 @@ func (c *Config) ToFaultsAutoProfileDef() faults.AutoProfileDef {
 				def.DurationMeanSimS[k] = v
 			}
 		}
-		// se vuoi derivare anche pesi durata da qualcos'altro, lasciare i default è ok
 	}
 	if c.Faults.FreqPerMinSim != nil && len(c.Faults.FrequencyPerMinSim) == 0 {
 		lambda := *c.Faults.FreqPerMinSim

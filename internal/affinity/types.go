@@ -9,9 +9,9 @@ const (
 	OutcomeCancelled
 )
 
-// Dati per il ranking pre-Probe (li componi in seed_coordinator)
+// Dati per il ranking pre-Probe (composti in seed_coordinator)
 type Candidate struct {
-	PeerID          string  // obbligatorio
+	PeerID          string
 	HasGPU          bool    // compatibilità per ClassGPUHeavy
 	AdvertAvail     float64 // [0..1] da piggyback (se non noto, usa -1 per "assente")
 	ProjectedLoad   float64 // [0..1] da AE (0=libero,1=pieno); se ignoto usa -1

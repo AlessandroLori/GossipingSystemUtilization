@@ -25,7 +25,7 @@ func NewJoinClient(log *logx.Logger, clock *simclock.Clock) *JoinClient {
 	return &JoinClient{log: log, clock: clock}
 }
 
-// === JOIN singolo (come prima) ===
+// === JOIN singolo ===
 func (c *JoinClient) TryJoin(seedsCSV string, req *proto.JoinRequest) (*proto.JoinReply, string, error) {
 	seeds := strings.Split(seedsCSV, ",")
 	delaySim := 0.5 // secondi SIM
@@ -65,8 +65,7 @@ func (c *JoinClient) TryJoin(seedsCSV string, req *proto.JoinRequest) (*proto.Jo
 	return nil, "", fmt.Errorf("join non riuscito dopo vari tentativi")
 }
 
-// === NEW: JOIN con almeno 2 seed distinti; merge di peers/stats ===
-// === JOIN "fino a due" seed distinti (ora accetta anche 1 seed) ===
+// === JOIN con seed distinti; merge di peers/stats ===
 func (c *JoinClient) TryJoinTwo(seedsCSV string, req *proto.JoinRequest) (*proto.JoinReply, []string, error) {
 	// parse & normalizza
 	all := strings.Split(seedsCSV, ",")
@@ -87,7 +86,7 @@ func (c *JoinClient) TryJoinTwo(seedsCSV string, req *proto.JoinRequest) (*proto
 		return nil, nil, fmt.Errorf("TryJoinTwo: nessun seed valido in SEEDS (serve almeno 1)")
 	}
 
-	// obiettivo: 2 successi se disponibili, altrimenti 1 se c'è un solo seed
+	// obiettivo: più successi se disponibili, altrimenti 1 se c'è un solo seed
 	target := 2
 	if len(seeds) == 1 {
 		target = 1
@@ -155,7 +154,7 @@ func (c *JoinClient) TryJoinTwo(seedsCSV string, req *proto.JoinRequest) (*proto
 		if len(successAddrs) >= target {
 			break
 		}
-		// backoff (tempo simulato, se disponibile)
+		// backoff
 		if c.clock != nil {
 			c.clock.SleepSim(time.Duration(delaySim * float64(time.Second)))
 		} else {

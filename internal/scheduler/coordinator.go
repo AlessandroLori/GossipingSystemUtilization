@@ -19,14 +19,12 @@ type CandidateSampler func(max int) []*proto.Stats
 // Applica il job localmente (es. node.StartJobLoad). true se accettato.
 type LocalCommitFn func(job jobs.Spec) bool
 
-// (Opzionale) Hook per leggere (dal Piggyback) l'ultimo advert noto per un peer.
-// Se non lo imposti, lo scoring usa solo AE/Stats.
-// - avail: 0..255 (stesso significato di Advert.Avail). Verrà normalizzato a 0..1.
+// - avail: 0..255
 // - ok:    true se l’advert è noto.
 // - fresh: true se l’advert è fresco (non scaduto, secondo il tuo piggyback).
 type PBLookup func(nodeID string) (avail uint8, ok bool, fresh bool)
 
-// PBLookup2: come PBLookup ma include busy_until_ms del peer.
+// PBLookup2: come PBLookup e include busy_until_ms del peer.
 type PBLookup2 func(nodeID string) (avail uint8, ok bool, fresh bool, busyUntilMs int64)
 
 // Parametri dello scheduler (blocco "scheduler" nel config.json).
@@ -46,7 +44,7 @@ type Params struct {
 	// Pesi score
 	Weights Weights
 
-	// Peso (0..1+) della penalità se il peer è in cool-off (busy_until futuro)
+	// Peso (0..1+) della penalità se il peer è in cool-off
 	BusyPenalty float64
 }
 
@@ -66,7 +64,7 @@ type Coordinator struct {
 	local     LocalCommitFn
 	pbLookup2 PBLookup2
 
-	// (Opzionale) Sorgente piggyback per leggere avail/fresh dell’advert.
+	// Sorgente piggyback per leggere avail/fresh dell’advert.
 	pbLookup PBLookup
 }
 
@@ -96,7 +94,7 @@ func NewCoordinator(
 	return &Coordinator{log: log, clock: clock, par: par, sampler: sampler, local: local}
 }
 
-// Con questa puoi iniettare la lettura dal Piggyback senza cambiare la firma del costruttore.
+// Inietta la lettura dal Piggyback
 func (c *Coordinator) WithPBLookup(fn PBLookup) *Coordinator {
 	c.pbLookup = fn
 	return c
@@ -175,7 +173,7 @@ func (c *Coordinator) checkHeadroom(s *proto.Stats, j jobs.Spec) bool {
 	return true
 }
 
-// utility locale (se mai servisse)
+// utility locale
 func d(sec float64) time.Duration { return time.Duration(sec * float64(time.Second)) }
 
 // ===============================
@@ -209,7 +207,7 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 		// AE-based availability (da Stats live)
 		availAE := availabilityFromStats(s)
 
-		// Piggyback (opzionale)
+		// Piggyback
 		availPB := -1.0
 		freshPB := false
 		var busyUntil int64
@@ -261,7 +259,7 @@ func (c *Coordinator) rankCandidatesForJob(j jobs.Spec, stats []*proto.Stats, to
 			availComb = 0.5*availAE + 0.5*availPB
 		}
 
-		// Penalità da cool-off (binary 0/1, scalata da par.BusyPenalty)
+		// Penalità da cool-off
 		pen := 0.0
 		if busyUntil > nowMs {
 			pen = 1.0

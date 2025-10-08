@@ -40,8 +40,8 @@ type schedJob struct {
 //	NODE_PRIMARY_DOMINANCE (0.50..0.90) default 0.70
 //	NODE_RATE_DIST (slow|normal|fast|mix) default mix
 type NodePersona struct {
-	Primary              int        // 0=GENERAL, 1=CPU_ONLY, 2=MEM_HEAVY, 3=GPU_HEAVY
-	Dominance            float64    // tipicamente 0.6..0.85
+	Primary              int // 0=GENERAL, 1=CPU_ONLY, 2=MEM_HEAVY, 3=GPU_HEAVY
+	Dominance            float64
 	Mix                  [4]float64 // prob. con cui si sceglie la classe ad ogni job (somma=1)
 	RateLabel            string     // "slow"|"normal"|"fast"
 	RateFactor           float64    // 1.50 (slow), 1.00 (normal), 0.70 (fast)
@@ -123,7 +123,7 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 		}
 		return unif(min, hi)
 	}
-	// ⇒ garantisce value ≥ lower (se il range è troppo basso, allarghiamo la coda alta)
+	// garantisce value ≥ lower (se il range è troppo basso, allarghiamo la coda alta)
 	sampleAtLeast := func(min, max, lower float64) float64 {
 		lo := min
 		if lower > lo {
@@ -178,9 +178,8 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 		gpuMin, gpuMax = expand(weightedAnchor(cls, "gpu", gb, g))
 	}
 
-	// Per GENERAL, se non c'è cap esplicito mettiamo 50 max (1–50).
+	// Per GENERAL mettiamo 50 max (1–50).
 	if cls == 0 { // GENERAL
-		// Non toccare cap espliciti <50 (li rispettiamo), ma se "aperti" li portiamo a 50.
 		if !g.cfg.Workload.UseBuckets() {
 			cpuMax = capIfNoExplicit(cpuMax)
 			memMax = capIfNoExplicit(memMax)
@@ -217,7 +216,7 @@ func (g *nodeJobGenerator) drawJob() schedJob {
 	switch cls {
 	case 1: // CPU_ONLY
 		cpu = sampleAtLeast(cpuMin, cpuMax, g.cpuTh) // ≥ soglia (es. 70)
-		mem = sampleBelow(memMin, memMax, g.memTh)   // sotto soglia
+		mem = sampleBelow(memMin, memMax, g.memTh)
 		gpu = sampleBelow(gpuMin, gpuMax, g.gpuTh*0.5)
 	case 2: // MEM_HEAVY
 		mem = sampleAtLeast(memMin, memMax, g.memTh) // ≥ soglia (es. 65)
@@ -366,7 +365,7 @@ func samplePeersFromSWIM(mgr *swim.Manager, r *mrand.Rand, selfID string, n int)
 		out = append(out, &proto.PeerInfo{
 			NodeId: p.ID,
 			Addr:   p.Addr,
-			IsSeed: false, // non lo sappiamo da SWIM; non serve per il probe
+			IsSeed: false,
 		})
 		if len(out) >= n {
 			break
@@ -390,7 +389,7 @@ func StartSeedCoordinator(
 	r *mrand.Rand,
 	cfg *config.Config,
 	reg *seed.Registry, // può essere nil sui peer
-	swimMgr *swim.Manager, // NEW: fallback membership per i peer
+	swimMgr *swim.Manager, //fallback membership per i peer
 	selfID string,
 	pbq *piggyback.Queue,
 	persona NodePersona,
@@ -505,7 +504,7 @@ func StartSeedCoordinator(
 				if !IsNodeUp() {
 					break
 				}
-				// Cool-off: chiamala sempre; se down, skippa senza log
+				// Cool-off: se down, skippa senza log
 				if CoolOffShouldSkip(clock, p.Addr, log) {
 					continue
 				}
@@ -722,10 +721,10 @@ func commitJob(clock *simclock.Clock, addr string, job schedJob, timeoutMs int, 
 
 	cli := proto.NewGossipClient(conn)
 
-	// CommitRequest ha campi flat (niente Job: ...)
+	// CommitRequest ha campi flat
 	req := &proto.CommitRequest{
 		JobId:      job.id,
-		ToNodeId:   "", // opzionale: puoi lasciarlo vuoto; l'RPC va già all'addr del peer target
+		ToNodeId:   "", // l'RPC va già all'addr del peer target
 		CpuPct:     job.cpu,
 		MemPct:     job.mem,
 		GpuPct:     job.gpu,
@@ -769,7 +768,7 @@ func rankCandidatesForJob(
 		advAvail := -1.0
 		fresh := true
 		penalty := 0.0
-		projected := -1.0 // 0..1 (basso=meglio), -1 = ignoto
+		projected := -1.0
 
 		if pbq != nil {
 			// 1) avail/fresh/penalty dal piggyback
@@ -782,7 +781,7 @@ func rankCandidatesForJob(
 				}
 			}
 
-			// 2) CPU/MEM/GPU specifici dall’ultimo advert (se presente, grazie alla patch del piggyback)
+			// 2) CPU/MEM/GPU specifici dall’ultimo advert (se presente, grazie al piggyback)
 			if a, ok2 := pbq.Latest(p.NodeId); ok2 {
 				if !a.HasGPU {
 					hasGPU = false
@@ -799,16 +798,15 @@ func rankCandidatesForJob(
 					if a.HasGPU {
 						loadPct = float64(a.GpuPct8)
 					} else {
-						loadPct = 100 // niente GPU -> trattalo come saturo per job GPU-heavy
+						loadPct = 100 // niente GPU -> tratta come saturo per job GPU-heavy
 					}
-				default: // GENERAL → usa il max (conservativo)
+				default: // GENERAL
 					c := float64(a.CpuPct8)
 					m := float64(a.MemPct8)
 					g := 0.0
 					if a.HasGPU {
 						g = float64(a.GpuPct8)
 					}
-					// max manuale senza math.Max
 					loadPct = c
 					if m > loadPct {
 						loadPct = m
@@ -830,14 +828,14 @@ func rankCandidatesForJob(
 		cands = append(cands, affinity.Candidate{
 			PeerID:          p.NodeId,
 			HasGPU:          hasGPU,
-			AdvertAvail:     advAvail,  // 0..1 (alto=meglio)
-			ProjectedLoad:   projected, // 0..1 (basso=meglio), -1=ignoto
-			CooldownPenalty: penalty,   // 0 o 1
+			AdvertAvail:     advAvail,
+			ProjectedLoad:   projected,
+			CooldownPenalty: penalty,
 			Fresh:           fresh,
 		})
 	}
 
-	// Rank (passiamo la classe come JobClass, il cast via PrimaryClass è già coerente)
+	// Rank
 	scored := aff.Rank(affinity.PrimaryClass(job.cpu, job.mem, job.gpu), cands, topK)
 
 	// ricostruisci PeerInfo ordinati
@@ -850,8 +848,7 @@ func rankCandidatesForJob(
 	return out
 }
 
-// AffinityInit va chiamata una sola volta all'avvio del coordinator (seed).
-// Esempio: all'interno della tua Start() del coordinator, dopo aver creato il clock.
+// AffinityInit chiamata una sola volta all'avvio del coordinator (seed).
 func AffinityInit(clk *simclock.Clock) {
 	affOnce.Do(func() {
 		cfg := affinity.DefaultConfig()
@@ -868,60 +865,6 @@ func AffinityInit(clk *simclock.Clock) {
 			cfg.HalfLife, cfg.DecayEvery, cfg.MaxFriendsPerClass)
 	})
 }
-
-/*
-// AffinityShutdown ferma i loop di decay/log quando chiudi il coordinator (opzionale).
-func AffinityShutdown() {
-	if affCtxCancel != nil {
-		affCtxCancel()
-		fmt.Printf("[Affinity] shutdown requested\n")
-	}
-}
-
-// AffinityPickProbeOrder calcola l'ordine dei peer da probare per il job.
-// Input: lista di candidati già arricchiti (HasGPU, Fresh, AdvertAvail, ProjectedLoad, CooldownPenalty).
-// Ritorna: lista di peerID in ordine decrescente di score. Stampa automaticamente il breakdown per peer.
-func AffinityPickProbeOrder(job *proto.JobSpec, cands []affinity.Candidate, topK int) []string {
-	if affMgr == nil {
-		fmt.Printf("[Affinity] WARN: manager nil; ritorno i candidati così come sono (%d)\n", len(cands))
-		out := make([]string, 0, len(cands))
-		for _, c := range cands {
-			out = append(out, c.PeerID)
-		}
-		return out
-	}
-
-	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
-	fmt.Printf("[Affinity] ranking job id=%s class=%v among %d candidates\n", job.Id, class, len(cands))
-
-	top := affMgr.Rank(class, cands, topK)
-
-	// Converte in sola lista di PeerID per il probe loop.
-	order := make([]string, 0, len(top))
-	for _, sc := range top {
-		order = append(order, sc.PeerID)
-	}
-	return order
-}
-
-// AffinityOnProbe va chiamata dopo la risposta di Probe (accepted/refused).
-func AffinityOnProbe(peer string, job *proto.JobSpec, accepted bool) {
-	if affMgr == nil || job == nil {
-		return
-	}
-	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
-	affMgr.UpdateOnProbe(peer, class, accepted)
-}
-
-// AffinityOnCommit va chiamata all'esito del commit (completed/refused/timeout/cancelled).
-func AffinityOnCommit(peer string, job *proto.JobSpec, outcome affinity.Outcome) {
-	if affMgr == nil || job == nil {
-		return
-	}
-	class := affinity.PrimaryClass(float64(job.CpuPct), float64(job.MemPct), float64(job.GpuPct))
-	affMgr.UpdateOnCommit(peer, class, outcome)
-}
-*/
 
 // ======== COOL-OFF REGISTRY (SIM-CLOCK AWARE) ========
 

@@ -4,13 +4,13 @@ import "time"
 
 type Config struct {
 	// Reputation decay
-	HalfLife   time.Duration // es. 60s (SIM)
-	DecayEvery time.Duration // es. 5s (SIM)
-	MinScore   float64       // clamp min
-	MaxScore   float64       // clamp max
+	HalfLife   time.Duration
+	DecayEvery time.Duration
+	MinScore   float64
+	MaxScore   float64
 
 	// Friends shortlist
-	MaxFriendsPerClass int // es. 32
+	MaxFriendsPerClass int
 
 	// Ranking weights
 	WReputation float64 // P
@@ -18,12 +18,12 @@ type Config struct {
 	WLeastLoad  float64 // L
 	WPenalty    float64 // penalità (sottratta)
 
-	// Esplorazione (oggi non usata in Rank(), utile se vorrai una Pick())
-	Epsilon     float64 // ε-greedy
-	SoftmaxTemp float64 // τ per softmax
+	// Esplorazione
+	Epsilon     float64
+	SoftmaxTemp float64
 
 	// Freschezza
-	StaleCutoff time.Duration // es. 5s SIM
+	StaleCutoff time.Duration
 
 	// Verbose prints
 	Verbose bool
@@ -47,7 +47,7 @@ func DefaultConfig() Config {
 	}
 }
 
-// Sanitize applica default di sicurezza e clamp semplici.
+// Sanitize, default di sicurezza e clamp semplici.
 func (c *Config) Sanitize() {
 	if c.HalfLife <= 0 {
 		c.HalfLife = 60 * time.Second

@@ -29,7 +29,7 @@ func Start(
 	cancelFn func(string) bool,
 	r *rand.Rand,
 	pbq *piggyback.Queue,
-	isUp func() bool, // <— NUOVO: gate runtime
+	isUp func() bool,
 ) (s *grpc.Server, lis net.Listener, reg *seed.Registry, err error) {
 
 	lis, err = net.Listen("tcp", grpcAddr)
@@ -62,7 +62,7 @@ func Start(
 	)
 	proto.RegisterGossipServer(s, srv)
 
-	// Serve
+	// Server
 	go func() {
 		if err := s.Serve(lis); err != nil {
 			log.Errorf("gRPC Serve: %v", err)

@@ -1,5 +1,3 @@
-// internal/app/app.go
-
 package app
 
 import (
@@ -51,7 +49,7 @@ type App struct {
 	Cfg *config.Config
 }
 
-// Init prepara tutti i componenti (non blocca).
+// Init prepara tutti i componenti.
 func (a *App) Init() error {
 	// Nodo
 	a.Node = node.New(a.ID, a.Addr, a.Clock, a.Log, a.Rng)
@@ -117,7 +115,7 @@ func (a *App) Init() error {
 		a.Clock,
 		a.SwimMgr,
 		a.ID,
-		seed.Sampler(statsSampler), // <-- tipo corretto
+		seed.Sampler(statsSampler),
 		func() *proto.Stats {
 			s := a.Node.CurrentStatsProto()
 			s.TsMs = a.Clock.NowSimMs()
@@ -160,7 +158,7 @@ func StartTTFDTracker(
 	}
 
 	go func() {
-		// protezione da panics: non uccidere il processo
+		// protezione da panics
 		defer func() {
 			if r := recover(); r != nil {
 				log.Warnf("TTFD: recovered from panic: %v", r)
@@ -186,7 +184,7 @@ func StartTTFDTracker(
 		}
 
 		seen := make(map[string]struct{})
-		seen[selfID] = struct{}{} // includi self
+		seen[selfID] = struct{}{}
 		targetOthers := expected - 1
 		if targetOthers < 0 {
 			targetOthers = 0
@@ -207,8 +205,8 @@ func StartTTFDTracker(
 				}
 			}
 
-			n := len(seen)  // include self
-			others := n - 1 // esclude self
+			n := len(seen)
+			others := n - 1
 			if others < 0 {
 				others = 0
 			}
@@ -227,7 +225,7 @@ func StartTTFDTracker(
 	}()
 }
 
-// helper atoi "tollerante"
+// helper atoi
 func strconvAtoiSafe(s string) (int, error) {
 	var n int
 	sign := 1
@@ -269,7 +267,7 @@ func StartFirstContactDiscoveryTracker(
 	}
 
 	go func() {
-		// protezione da panics: non uccidere il processo
+		// protezione da panics
 		defer func() {
 			if r := recover(); r != nil {
 				log.Warnf("FC-TTFD: recovered from panic: %v", r)

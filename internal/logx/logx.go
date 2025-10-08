@@ -25,7 +25,7 @@ func (l *Logger) with(level string, msg string) string {
 	return fmt.Sprintf("[%s] [%s] [%s] %s", ts, l.id, level, msg)
 }
 
-// ------- NEW: mute INFO globally when node is down -------
+// ------- Mute INFO globally when node is down -------
 var infoMuted atomic.Bool
 
 func MuteInfo()   { infoMuted.Store(true) }

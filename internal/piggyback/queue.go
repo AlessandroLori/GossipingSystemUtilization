@@ -272,13 +272,12 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
-		// Nome metodo (es. /proto.Gossip/Probe → Probe)
 		methodName := method
 		if idx := strings.LastIndex(methodName, "/"); idx >= 0 {
 			methodName = methodName[idx+1:]
 		}
 
-		// === PRE-CALL: allega adverts (se consentito) ===
+		// === PRE-CALL: allega adverts ===
 		if q != nil && !q.IsPaused() && q.SendEnabled() {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
@@ -297,7 +296,7 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 				q.log.Infof("PIGGYBACK SEND [%s] → to=%s attaching %d adverts: %v",
 					methodName, target, len(ads), summary)
 
-				// extra log per LEAVE in corso (con metodo)
+				// extra log per LEAVE in corso
 				nowMs := q.clock.NowSim().UnixMilli()
 				var leaves []string
 				for _, a := range ads {
@@ -318,7 +317,7 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		// === CALL ===
 		err := invoker(ctx, method, req, reply, cc, opts...)
 
-		// === POST-CALL: applica adverts ricevuti (se consentito) ===
+		// === POST-CALL: applica adverts ricevuti ===
 		if q != nil {
 			if q.IsPaused() || !q.RecvEnabled() {
 				return err
@@ -373,7 +372,6 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 			return nil, status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
 		}
 
-		// Nome metodo (es. /proto.Gossip/Probe → Probe)
 		methodName := info.FullMethod
 		if idx := strings.LastIndex(methodName, "/"); idx >= 0 {
 			methodName = methodName[idx+1:]
@@ -387,7 +385,7 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					if err != nil || len(arr) == 0 {
 						continue
 					}
-					// from (addr) se disponibile
+					// from (addr)
 					from := ""
 					if p, okp := peer.FromContext(ctx); okp && p != nil && p.Addr != nil {
 						from = p.Addr.String()
@@ -456,7 +454,7 @@ func encodeMD(arr []Advert) string {
 		tmp[19+len(nid)] = flags
 		binary.BigEndian.PutUint64(tmp[20+len(nid):28+len(nid)], uint64(a.BusyUntilMs))
 		binary.BigEndian.PutUint64(tmp[28+len(nid):36+len(nid)], uint64(a.LeaveUntilMs))
-		// NEW: cpu/mem/gpu (1 byte ciascuno)
+		// cpu/mem/gpu (1 byte ciascuno)
 		tmp[36+len(nid)] = a.CpuPct8
 		tmp[37+len(nid)] = a.MemPct8
 		tmp[38+len(nid)] = a.GpuPct8

@@ -10,7 +10,7 @@ import (
 	"GossipSystemUtilization/internal/simclock"
 )
 
-// Parametri della fault-sim come da config (*bool per rispettare i default)
+// Parametri della fault-sim come da config
 type FaultProfileInput struct {
 	Enabled               *bool
 	PrintTransitions      *bool
@@ -69,7 +69,7 @@ func StartFaultRecoveryWithRuntime(
 				log.Warnf("FAULT ↓ CRASH — stop gRPC + SWIM + AntiEntropy + Reporter")
 			}
 
-			// blocco duro piggyback e servizi
+			// blocco piggyback e servizi
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetSendEnabled(false)
 				rt.PBQueue.SetRecvEnabled(false)
@@ -96,7 +96,7 @@ func StartFaultRecoveryWithRuntime(
 	}()
 }
 
-// Versione generica riutilizzabile con Hooks esterni
+// Versione generica per Hooks esterni
 func StartFaultRecovery(
 	log *logx.Logger,
 	clock *simclock.Clock,

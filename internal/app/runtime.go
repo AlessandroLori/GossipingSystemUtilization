@@ -106,13 +106,13 @@ func (rt *Runtime) QuiesceForLeave() {
 	}
 
 	// La PBQueue resta attiva per l'annuncio leave.
-	// Il gating della RECV lo fai in leave_sim.go (SetRecvEnabled(false) prima dell'annuncio).
+	// Il gating della RECV in leave_sim.go (SetRecvEnabled(false) prima dell'annuncio).
 }
 
-// FinalizeLeaveStop: dopo gli avvisi, freddiamo anche la PBQueue.
+// FinalizeLeaveStop: dopo gli avvisi, freddiamo la PBQueue.
 func (rt *Runtime) FinalizeLeaveStop() {
 	if rt.PBQueue != nil {
-		// Dopo l'annuncio: freddiamo completamente la PBQueue
+		// freddiamo completamente la PBQueue
 		rt.PBQueue.SetSendEnabled(false)
 		rt.PBQueue.SetRecvEnabled(false)
 		rt.PBQueue.Pause()
@@ -282,7 +282,7 @@ func (rt *Runtime) tryJoinPostRecovery() {
 }
 
 // safeAddPeer aggiunge un peer alla membership SWIM solo se il Manager è attivo.
-// Evita panic se rt.Mgr è nil (es. durante leave/fault o durante il riavvio dei servizi).
+// Evita panic se rt.Mgr è nil (durante leave/fault o durante il riavvio dei servizi).
 func (rt *Runtime) safeAddPeer(id, addr string) {
 	if id == "" || addr == "" {
 		return
@@ -310,7 +310,7 @@ func (rt *Runtime) doJoin(prefix string) {
 		},
 	}
 
-	// Accetta 1 o 2 seed (TryJoinTwo prova a contattarli fino a due distinti se disponibili).
+	// Accetta seed (prova a contattarli se disponibili).
 	rep, seedAddrs, err := jc.TryJoinTwo(rt.SeedsCSV, req)
 	if err != nil {
 		rt.Log.Warnf("%s non riuscito: %v (contattati=%v)", prefix, err, seedAddrs)
@@ -322,7 +322,7 @@ func (rt *Runtime) doJoin(prefix string) {
 	}
 	rt.Log.Infof("%s via %v — peers=%d", prefix, seedAddrs, len(rep.Peers))
 
-	// registra i seed contattati (0..2) in modo sicuro (no panic se SWIM è down)
+	// registra i seed contattati in modo sicuro (no panic se SWIM è down)
 	if len(seedAddrs) >= 1 && seedAddrs[0] != "" {
 		rt.safeAddPeer("seed@"+seedAddrs[0], seedAddrs[0])
 	}
@@ -345,7 +345,6 @@ func (rt *Runtime) doJoin(prefix string) {
 	}
 }
 
-// dentro internal/app/runtime.go
 func (rt *Runtime) safeLocalSample(max int) []*proto.Stats {
 	// Durante recovery Engine può essere momentaneamente nil.
 	if rt.Engine != nil {

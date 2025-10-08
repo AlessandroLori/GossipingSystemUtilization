@@ -13,7 +13,6 @@ import (
 	"GossipSystemUtilization/internal/piggyback"
 	"GossipSystemUtilization/internal/simclock"
 
-	//"GossipSystemUtilization/internal/swim"
 	proto "GossipSystemUtilization/proto"
 )
 
@@ -59,9 +58,8 @@ func snapshotNeighborAddrs(rt *Runtime, selfID string, r *rand.Rand, maxTouch in
 
 	// 1) seed registry disponibile → usa quello
 	if rt != nil && rt.Registry != nil {
-		peers := rt.Registry.SamplePeers(selfID, 16) // prendiamo più di quanto toccheremo
+		peers := rt.Registry.SamplePeers(selfID, 16)
 		if len(peers) > 0 {
-			// mescola
 			r.Shuffle(len(peers), func(i, j int) { peers[i], peers[j] = peers[j], peers[i] })
 			limit := maxTouch
 			if len(peers) < limit {
@@ -90,7 +88,7 @@ func snapshotNeighborAddrs(rt *Runtime, selfID string, r *rand.Rand, maxTouch in
 		}
 	}
 
-	return addrs // eventualmente vuoto
+	return addrs
 }
 
 // === annuncio leave verso una lista di indirizzi (sincrono, nessuna goroutine) ===
@@ -114,7 +112,7 @@ func announceLeaveToAddressesSync(
 
 	for i := 0; i < n; i++ {
 		addr := addrs[i]
-		// timeout piccolo per non restare attivi a lungo
+		// timeout piccolo
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		conn, err := grpc.DialContext(ctx, addr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -130,10 +128,9 @@ func announceLeaveToAddressesSync(
 			cli := proto.NewGossipClient(conn)
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel2()
-			// Job minimale (0%) solo per generare traffico e portare l’advert
+			// Genero traffico e porto l’advert
 			js := &proto.JobSpec{CpuPct: 0, MemPct: 0, GpuPct: 0, DurationMs: 1}
 			_, _ = cli.Probe(ctx2, &proto.ProbeRequest{Job: js})
-			// con RecvEnabled=false non applicheremo eventuali adverts in reply
 		}()
 	}
 }
@@ -195,7 +192,7 @@ func StartLeaveRecoveryWithRuntime(
 	durClass := pickKeyWeighted(r, in.DurationClassWeights)
 	meanAway := in.DurationMeanSimS[durClass]
 
-	meanUp := math.Inf(1) // 60/λ, se λ=0 mostriamo +Inf
+	meanUp := math.Inf(1)
 	if ratePerMin > 0 {
 		meanUp = 60.0 / ratePerMin
 	}
@@ -237,7 +234,7 @@ func StartLeaveRecoveryWithRuntime(
 			if rt.PBQueue != nil {
 				rt.PBQueue.SetBusyFor(dur)
 				rt.PBQueue.SetLeaveFor(dur)
-				rt.PBQueue.SetRecvEnabled(false) // fondamentale: non applicare reply
+				rt.PBQueue.SetRecvEnabled(false)
 				forceSelfAdvertLeave(rt, clock, selfID, dur)
 			}
 

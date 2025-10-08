@@ -25,13 +25,13 @@ type Server struct {
 	clock   *simclock.Clock
 	mgr     *swim.Manager
 	myID    string
-	sampler Sampler // come riempire l'AvailBatch di risposta
+	sampler Sampler //per AvailBatch di risposta
 	// callback per job
 	selfStatsFn   func() *proto.Stats
 	applyCommitFn func(jobID string, cpu, mem, gpu float64, durMs int64) bool
 	cancelFn      func(jobID string) bool
 
-	isUp func() bool // <— NUOVO: gate runtime
+	isUp func() bool // gate runtime
 }
 
 func NewServer(
@@ -45,7 +45,7 @@ func NewServer(
 	selfStatsFn func() *proto.Stats,
 	applyCommitFn func(jobID string, cpu, mem, gpu float64, durMs int64) bool,
 	cancelFn func(jobID string) bool,
-	isUp func() bool, // <— NUOVO
+	isUp func() bool,
 ) *Server {
 	return &Server{
 		isSeed:        isSeed,
