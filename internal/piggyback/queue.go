@@ -272,25 +272,32 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
+		// Nome metodo (es. /proto.Gossip/Probe → Probe)
+		methodName := method
+		if idx := strings.LastIndex(methodName, "/"); idx >= 0 {
+			methodName = methodName[idx+1:]
+		}
+
 		// === PRE-CALL: allega adverts (se consentito) ===
 		if q != nil && !q.IsPaused() && q.SendEnabled() {
 			ads := q.TakeForSend(3)
 			if len(ads) > 0 {
-				// log compatibile con esistente
+				// log con metodo
 				var summary []string
 				for _, a := range ads {
 					summary = append(summary,
-						fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
-							a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+						fmt.Sprintf("%s(av:%d busy:%d gpu:%t)",
+							a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU),
 					)
 				}
 				target := ""
 				if cc != nil {
 					target = cc.Target()
 				}
-				q.log.Infof("PIGGYBACK SEND → to=%s attaching %d adverts: %v", target, len(ads), summary)
+				q.log.Infof("PIGGYBACK SEND [%s] → to=%s attaching %d adverts: %v",
+					methodName, target, len(ads), summary)
 
-				// extra log per LEAVE in corso
+				// extra log per LEAVE in corso (con metodo)
 				nowMs := q.clock.NowSim().UnixMilli()
 				var leaves []string
 				for _, a := range ads {
@@ -300,7 +307,8 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 					}
 				}
 				if len(leaves) > 0 {
-					q.log.Warnf("LEAVE UPDATE SEND → to=%s  %d notice(s): %s", target, len(leaves), strings.Join(leaves, ", "))
+					q.log.Warnf("LEAVE UPDATE SEND [%s] → to=%s  %d notice(s): %s",
+						methodName, target, len(leaves), strings.Join(leaves, ", "))
 				}
 
 				ctx = metadata.AppendToOutgoingContext(ctx, mdKey, encodeMD(ads))
@@ -312,12 +320,7 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 
 		// === POST-CALL: applica adverts ricevuti (se consentito) ===
 		if q != nil {
-			// in leave/fault "hard" → rifiuta
-			if q.IsPaused() {
-				return err
-			}
-			// gating fine: durante leave annuncio, disabilitiamo la RECV
-			if !q.RecvEnabled() {
+			if q.IsPaused() || !q.RecvEnabled() {
 				return err
 			}
 			if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -336,16 +339,18 @@ func UnaryClientInterceptor(q *Queue) grpc.UnaryClientInterceptor {
 					nowMs := q.clock.NowSim().UnixMilli()
 					for _, a := range arr {
 						summary = append(summary,
-							fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)",
-								a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU),
+							fmt.Sprintf("%s(av:%d busy:%d gpu:%t)",
+								a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU),
 						)
 					}
-					q.log.Infof("PIGGYBACK RECV ← from=%s received %d adverts: %v", from, len(arr), summary)
+					q.log.Infof("PIGGYBACK RECV [%s] ← from=%s received %d adverts: %v",
+						methodName, from, len(arr), summary)
 
 					for _, a := range arr {
 						if a.LeaveUntilMs > nowMs {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
-							q.log.Warnf("LEAVE UPDATE RECV ← from=%s node=%s remain≈%s", from, a.NodeId, rem.Truncate(100*time.Millisecond))
+							q.log.Warnf("LEAVE UPDATE RECV [%s] ← from=%s node=%s remain≈%s",
+								methodName, from, a.NodeId, rem.Truncate(100*time.Millisecond))
 						}
 						q.Upsert(a)
 					}
@@ -362,12 +367,18 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 		req interface{},
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
-
 	) (interface{}, error) {
 
 		if q != nil && q.IsPaused() {
 			return nil, status.Error(codes.Unavailable, "node temporarily unavailable (leave/fault)")
 		}
+
+		// Nome metodo (es. /proto.Gossip/Probe → Probe)
+		methodName := info.FullMethod
+		if idx := strings.LastIndex(methodName, "/"); idx >= 0 {
+			methodName = methodName[idx+1:]
+		}
+
 		if q != nil {
 			if md, ok := metadata.FromIncomingContext(ctx); ok {
 				vals := md.Get(mdKey)
@@ -385,14 +396,19 @@ func UnaryServerInterceptor(q *Queue) grpc.UnaryServerInterceptor {
 					var summary []string
 					nowMs := q.clock.NowSim().UnixMilli()
 					for _, a := range arr {
-						summary = append(summary, fmt.Sprintf("%s(av:%d busy:%d leave:%d gpu:%t)", a.NodeId, a.Avail, a.BusyUntilMs, a.LeaveUntilMs, a.HasGPU))
+						summary = append(summary,
+							fmt.Sprintf("%s(av:%d busy:%d gpu:%t)",
+								a.NodeId, a.Avail, a.BusyUntilMs, a.HasGPU),
+						)
 					}
-					q.log.Infof("PIGGYBACK RECV ← from=%s received %d adverts: %v", from, len(arr), summary)
+					q.log.Infof("PIGGYBACK RECV [%s] ← from=%s received %d adverts: %v",
+						methodName, from, len(arr), summary)
 
 					for _, a := range arr {
 						if a.LeaveUntilMs > nowMs {
 							rem := time.Duration(a.LeaveUntilMs-nowMs) * time.Millisecond
-							q.log.Warnf("LEAVE UPDATE RECV ← from=%s node=%s remain≈%s", from, a.NodeId, rem.Truncate(100*time.Millisecond))
+							q.log.Warnf("LEAVE UPDATE RECV [%s] ← from=%s node=%s remain≈%s",
+								methodName, from, a.NodeId, rem.Truncate(100*time.Millisecond))
 						}
 						q.Upsert(a)
 					}

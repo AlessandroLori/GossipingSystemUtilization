@@ -426,7 +426,7 @@ func StartSeedCoordinator(
 	// 3) Generatore per-nodo
 	gen := newNodeJobGeneratorFromPersona(r, cfg, persona)
 	logWorkloadMixOnce(log, cfg, cTh, mTh, gTh)
-	log.Infof("Coordinator attivo: persona=%s  mix=%.2f/%.2f/%.2f/%.2f  rate=%s*x%.2f  mean_interarrival=%.1fs",
+	log.Infof("JOB GENERATION: job_type=%s  mix=General:%.2f, CPU_int:%.2f, MEM_int:%.2f, GPU_int:%.2f, rate=%s*x%.2f  mean_interarrival=%.1fs",
 		className(persona.Primary), persona.Mix[0], persona.Mix[1], persona.Mix[2], persona.Mix[3],
 		persona.RateLabel, persona.RateFactor, gen.meanS,
 	)

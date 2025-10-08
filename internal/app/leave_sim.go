@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"time"
 
@@ -180,12 +181,33 @@ func StartLeaveRecoveryWithRuntime(
 	}
 	printTrans := (in.PrintTransitions != nil && *in.PrintTransitions)
 
+	// Log "a mappe" (config effettivo)
 	log.Infof("LEAVE PROFILE → freq_weights=%v freq_rate_per_min=%v dur_weights=%v dur_mean_s=%v",
 		in.FrequencyClassWeights, in.FrequencyPerMinSim, in.DurationClassWeights, in.DurationMeanSimS)
 
+	// --- PROFILO PER-NODO (one-shot) ---
+	if r == nil {
+		r = rand.New(rand.NewSource(time.Now().UnixNano()))
+	}
+	freqClass := pickKeyWeighted(r, in.FrequencyClassWeights)
+	ratePerMin := in.FrequencyPerMinSim[freqClass]
+
+	durClass := pickKeyWeighted(r, in.DurationClassWeights)
+	meanAway := in.DurationMeanSimS[durClass]
+
+	meanUp := math.Inf(1) // 60/λ, se λ=0 mostriamo +Inf
+	if ratePerMin > 0 {
+		meanUp = 60.0 / ratePerMin
+	}
+	log.Infof(
+		"LEAVE PROFILE → freqClass=%s (λ≈%.3f leave/min), durClass=%s (meanAway=%.1fs), meanUp=%.1fs",
+		freqClass, ratePerMin, durClass, meanAway, meanUp,
+	)
+	// --- fine profilo per-nodo ---
+
 	go func() {
 		for {
-			// 1) attesa simulata prima della leave
+			// 1) attesa simulata prima della leave (comportamento invariato)
 			freqClass := pickKeyWeighted(r, in.FrequencyClassWeights)
 			ratePerMin := in.FrequencyPerMinSim[freqClass]
 			waitSim := 999999.0
@@ -197,7 +219,7 @@ func StartLeaveRecoveryWithRuntime(
 			}
 			clock.SleepSim(time.Duration(waitSim * float64(time.Second)))
 
-			// 2) durata leave
+			// 2) durata leave (comportamento invariato)
 			durClass := pickKeyWeighted(r, in.DurationClassWeights)
 			meanS := in.DurationMeanSimS[durClass]
 			if meanS <= 0 {
@@ -222,7 +244,7 @@ func StartLeaveRecoveryWithRuntime(
 			// B2) snapshot dei vicini PRIMA di spegnere la rete
 			addrs := snapshotNeighborAddrs(rt, selfID, r, 6)
 
-			// C) QUiesce: ferma Reporter, AE, gRPC e SWIM
+			// C) Quiesce: ferma Reporter, AE, gRPC e SWIM
 			rt.QuiesceForLeave()
 
 			// D) avvisa SINCRONO i vicini raccolti (solo attach, nessuna recv)

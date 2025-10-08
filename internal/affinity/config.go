@@ -35,7 +35,7 @@ func DefaultConfig() Config {
 		DecayEvery:         5 * time.Second,
 		MinScore:           -5.0,
 		MaxScore:           10.0,
-		MaxFriendsPerClass: 32,
+		MaxFriendsPerClass: 4,
 		WReputation:        0.5,
 		WPiggyback:         0.3,
 		WLeastLoad:         0.2,

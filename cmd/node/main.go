@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"GossipSystemUtilization/internal/app"
+	"GossipSystemUtilization/internal/faults"
 
 	"GossipSystemUtilization/internal/antientropy"
 	"GossipSystemUtilization/internal/config"
@@ -324,7 +325,9 @@ func main() {
 	}
 
 	// === Fault-sim (Crash & Recovery) ===
-	app.StartFaultRecoveryWithRuntime(
+	// Usa il percorso che disegna e LOGGA il profilo per-nodo (InitSimWithProfile),
+	// collegando gli hook al runtime per fermare/riavviare i servizi.
+	app.StartFaultRecovery(
 		log, clock, r,
 		app.FaultProfileInput{
 			Enabled:               cfg.Faults.Enabled,
@@ -334,7 +337,16 @@ func main() {
 			DurationClassWeights:  cfg.Faults.DurationClassWeights,
 			DurationMeanSimS:      cfg.Faults.DurationMeanSimS,
 		},
-		rt,
+		faults.Hooks{
+			OnDown: func() {
+				log.Warnf("FAULT ↓ CRASH — stop SWIM + AE + Reporter + gRPC")
+				rt.StopAll()
+			},
+			OnUp: func() {
+				log.Warnf("FAULT ↑ RECOVERY — restart SWIM + AE + Reporter + gRPC")
+				rt.RecoverAll()
+			},
+		},
 	)
 
 	// === Delay di ingresso (ondate) + Join iniziale (solo peer non-seed) ===

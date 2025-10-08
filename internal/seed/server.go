@@ -93,7 +93,7 @@ func (s *Server) Join(ctx context.Context, req *proto.JoinRequest) (*proto.JoinR
 	}
 	var snapshot []*proto.Stats
 	if s.sampler != nil {
-		snapshot = s.sampler(64)
+		snapshot = s.sampler(8)
 	}
 	return &proto.JoinReply{Peers: peers, StatsSnapshot: snapshot}, nil
 }
@@ -142,7 +142,7 @@ func (s *Server) ExchangeAvail(ctx context.Context, in *proto.AvailBatch) (*prot
 	}
 	var out []*proto.Stats
 	if s.sampler != nil {
-		out = s.sampler(64)
+		out = s.sampler(8)
 	}
 	return &proto.AvailBatch{Stats: out}, nil
 }

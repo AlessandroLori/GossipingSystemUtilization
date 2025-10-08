@@ -194,6 +194,7 @@ func (m *Manager) DumpString(maxPerClass int) string {
 	if maxPerClass <= 0 {
 		maxPerClass = 8
 	}
+	// ordine “naturale” delle classi
 	classes := []JobClass{ClassGeneral, ClassCPUOnly, ClassMemHeavy, ClassGPUHeavy}
 
 	var b strings.Builder
@@ -201,16 +202,17 @@ func (m *Manager) DumpString(maxPerClass int) string {
 		m.cfg.MaxFriendsPerClass, m.cfg.HalfLife.Seconds())
 
 	for _, c := range classes {
-		fmt.Fprintf(&b, "- Class=%v\n", c)
+		// intestazione con etichetta leggibile
+		fmt.Fprintf(&b, "- Class=%v (%s)\n", c, classLabel(c))
 
-		// Friends snapshot
+		// Friends snapshot (limitato a maxPerClass)
 		fs := m.fr.Snapshot(c)
 		if len(fs) > maxPerClass {
 			fs = fs[:maxPerClass]
 		}
 		fmt.Fprintf(&b, "  Friends: %v\n", fs)
 
-		// Reputation top
+		// Reputation top (raw e normalizzata), ordinata desc per raw
 		snap := m.rep.SnapshotClass(c)
 		type kv struct {
 			id  string
@@ -224,12 +226,22 @@ func (m *Manager) DumpString(maxPerClass int) string {
 		if len(top) > maxPerClass {
 			top = top[:maxPerClass]
 		}
-		fmt.Fprintf(&b, "  RepTop: [")
+
+		// normalizzazione robusta (evita divisioni per zero)
+		minS, maxS := m.cfg.MinScore, m.cfg.MaxScore
+		den := maxS - minS
+		if den == 0 {
+			den = 1 // evita NaN se qualcuno setta min=max
+		}
+
+		// stampa compatta "id: raw=.. norm=.., id2: ..."
+		b.WriteString("  RepTop: [")
 		for i, t := range top {
 			if i > 0 {
-				b.WriteString("  ")
+				b.WriteString(", ")
 			}
-			fmt.Fprintf(&b, "%s: raw=%.2f norm=%.2f", t.id, t.raw, (t.raw-m.cfg.MinScore)/(m.cfg.MaxScore-m.cfg.MinScore))
+			norm := (t.raw - minS) / den
+			fmt.Fprintf(&b, "%s: raw=%.2f norm=%.2f", t.id, t.raw, norm)
 		}
 		b.WriteString("]\n")
 	}
@@ -246,4 +258,18 @@ func clamp01(x float64) float64 {
 		return 1
 	}
 	return x
+}
+
+// Restituisce l'etichetta leggibile della classe di job.
+func classLabel(c JobClass) string {
+	switch c {
+	case ClassCPUOnly:
+		return "CPU_ONLY"
+	case ClassMemHeavy:
+		return "MEM_HEAVY"
+	case ClassGPUHeavy:
+		return "GPU_HEAVY"
+	default:
+		return "GENERAL"
+	}
 }

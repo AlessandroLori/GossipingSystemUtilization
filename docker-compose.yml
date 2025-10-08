@@ -60,7 +60,6 @@ services:
     ports: ["9006:9006"]
 
   # --------- PEER NODES ----------
-  # Esempio di distribuzione SEEDS (variegata). Cambia come ti serve.
   peer1:  { <<: *peer, container_name: peer1,  environment: { GRPC_ADDR: "peer1:9002",  SEEDS: "seed1:9001,seed2:9004,seed3:9006" } }
   peer2:  { <<: *peer, container_name: peer2,  environment: { GRPC_ADDR: "peer2:9003",  SEEDS: "seed1:9001,seed2:9004" } }
   peer3:  { <<: *peer, container_name: peer3,  environment: { GRPC_ADDR: "peer3:9005",  SEEDS: "seed1:9001,seed3:9006" } }

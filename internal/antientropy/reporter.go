@@ -104,7 +104,7 @@ func (r *Reporter) printSummary() {
 		sumCPU, sumMEM, sumGPU          float64
 		nCPU, nMEM, nGPU                int
 		minCPUPct, minMEMPct, minGPUPct = 1e9, 1e9, 1e9
-		minCPUID, minMEMID, minGPUID    string
+		//minCPUID, minMEMID, minGPUID    string
 	)
 
 	for _, s := range stats {
@@ -113,31 +113,34 @@ func (r *Reporter) printSummary() {
 		nCPU++
 		nMEM++
 		if s.CpuPct < minCPUPct {
-			minCPUPct, minCPUID = s.CpuPct, s.NodeId
+			minCPUPct = s.CpuPct
 		}
 		if s.MemPct < minMEMPct {
-			minMEMPct, minMEMID = s.MemPct, s.NodeId
+			minMEMPct = s.MemPct
 		}
 		if s.GpuPct >= 0 {
 			sumGPU += s.GpuPct
 			nGPU++
 			if s.GpuPct < minGPUPct {
-				minGPUPct, minGPUID = s.GpuPct, s.NodeId
+				minGPUPct = s.GpuPct
 			}
 		}
 	}
-	avgCPU := sumCPU / float64(nCPU)
-	avgMEM := sumMEM / float64(nMEM)
+	/*
+		avgCPU := sumCPU / float64(nCPU)
+		avgMEM := sumMEM / float64(nMEM)
 
-	if nGPU > 0 {
-		avgGPU := sumGPU / float64(nGPU)
-		r.log.Infof("CLUSTER SUMMARY → nodes=%d cpu_avg=%.1f%% mem_avg=%.1f%% gpu_avg=%.1f%% (gpu_nodes=%d) minCPU=%s@%.1f%% minMEM=%s@%.1f%% minGPU=%s@%.1f%%",
-			len(stats), avgCPU, avgMEM, avgGPU, nGPU,
-			minCPUID, minCPUPct, minMEMID, minMEMPct, minGPUID, minGPUPct)
-	} else {
-		r.log.Infof("CLUSTER SUMMARY → nodes=%d cpu_avg=%.1f%% mem_avg=%.1f%% (no GPU nodes) minCPU=%s@%.1f%% minMEM=%s@%.1f%%",
-			len(stats), avgCPU, avgMEM, minCPUID, minCPUPct, minMEMID, minMEMPct)
-	}
+
+		if nGPU > 0 {
+			avgGPU := sumGPU / float64(nGPU)
+			r.log.Infof("CLUSTER SUMMARY → nodes=%d cpu_avg=%.1f%% mem_avg=%.1f%% gpu_avg=%.1f%% (gpu_nodes=%d) minCPU=%s@%.1f%% minMEM=%s@%.1f%% minGPU=%s@%.1f%%",
+				len(stats), avgCPU, avgMEM, avgGPU, nGPU,
+				minCPUID, minCPUPct, minMEMID, minMEMPct, minGPUID, minGPUPct)
+		} else {
+			r.log.Infof("CLUSTER SUMMARY → nodes=%d cpu_avg=%.1f%% mem_avg=%.1f%% (no GPU nodes) minCPU=%s@%.1f%% minMEM=%s@%.1f%%",
+				len(stats), avgCPU, avgMEM, minCPUID, minCPUPct, minMEMID, minMEMPct)
+		}
+	*/
 
 	type kv struct {
 		id string

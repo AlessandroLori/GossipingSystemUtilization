@@ -19,7 +19,7 @@ type Friends struct {
 // NewFriends crea una tabella friends bounded (per classe).
 func NewFriends(maxPerClass int, verbose bool) *Friends {
 	if maxPerClass <= 0 {
-		maxPerClass = 32
+		maxPerClass = 4
 	}
 	return &Friends{
 		maxPerClass:   maxPerClass,
