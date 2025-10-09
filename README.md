@@ -30,3 +30,7 @@ Manuale:
 2) make up-manual ----> avvia in automatico i container ma non l'esecuzione del nodo
 3) make sh-peerNUM o make sh-seedNUM ----> connessione al container
 4) /app/entrypoint.sh ---> avvia l'esecuzione del nodo con logs
+
+Rimozione:
+ - docker compose down ---> ferma esecuzione e rimuove container
+ - docker compose stop ---> ferma esecuzione
