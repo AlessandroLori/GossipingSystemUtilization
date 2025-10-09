@@ -19,3 +19,14 @@ Quando un nodo effettua una Leave volontaria lo comunica ad al più 3 nodi appar
 Ogni nodo è rappresentato da un container Docker per garantire isolamento e la corrette emulazione come fosse un sistema distribuito reale.
 
 Comandi per l'esecuzione Docker:
+
+Automatica:
+1) make build
+2) make up ---> avvia in automatico i container e l'escuzione del nodo
+3) make logs-peerNUMEROPEER o make logs-seedNUMEROSEED --> connette al container per vedere logs di esecuzione già iniziata del nodo
+
+Manuale:
+1) make build
+2) make up-manual ----> avvia in automatico i container ma non l'esecuzione del nodo
+3) make sh-peerNUM o make sh-seedNUM ----> connessione al container
+4) /app/entrypoint.sh ---> avvia l'esecuzione del nodo con logs
