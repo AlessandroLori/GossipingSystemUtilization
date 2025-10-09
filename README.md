@@ -23,7 +23,7 @@ Comandi per l'esecuzione Docker:
 Automatica:
 1) make build
 2) make up ---> avvia in automatico i container e l'escuzione del nodo
-3) make logs-peerNUMEROPEER o make logs-seedNUMEROSEED --> connette al container per vedere logs di esecuzione già iniziata del nodo
+3) make logs-peerNUM o make logs-seedNUM --> connette al container per vedere logs di esecuzione già iniziata del nodo
 
 Manuale:
 1) make build
